@@ -1,0 +1,116 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgGradient" x1="160" y1="112" x2="876" y2="924" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#14171D"/>
+      <stop offset="0.54" stop-color="#1C232D"/>
+      <stop offset="1" stop-color="#0C1015"/>
+    </linearGradient>
+    <radialGradient id="bgGlowTop" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(244 180) rotate(34.5) scale(526 416)">
+      <stop stop-color="#FFFFFF" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="bgGlowBottom" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(826 860) rotate(-146) scale(452 318)">
+      <stop stop-color="#2DD4BF" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#2DD4BF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="panelGradient" x1="512" y1="326" x2="512" y2="696" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1F2833"/>
+      <stop offset="0.48" stop-color="#111821"/>
+      <stop offset="1" stop-color="#0C1118"/>
+    </linearGradient>
+    <linearGradient id="panelInnerGlow" x1="318" y1="356" x2="748" y2="688" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="bezelGradient" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#0A0D11"/>
+      <stop offset="1" stop-color="#212B35"/>
+    </linearGradient>
+    <radialGradient id="redLamp" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(0.38 0.3) scale(1)">
+      <stop stop-color="#FFD7D1"/>
+      <stop offset="0.36" stop-color="#FF685B"/>
+      <stop offset="0.78" stop-color="#EB2C2C"/>
+      <stop offset="1" stop-color="#9B0F16"/>
+    </radialGradient>
+    <radialGradient id="yellowLamp" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(0.38 0.3) scale(1)">
+      <stop stop-color="#FFF5CF"/>
+      <stop offset="0.34" stop-color="#FFD768"/>
+      <stop offset="0.8" stop-color="#FFB100"/>
+      <stop offset="1" stop-color="#9C6500"/>
+    </radialGradient>
+    <radialGradient id="greenLamp" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(0.38 0.3) scale(1)">
+      <stop stop-color="#D6FFE0"/>
+      <stop offset="0.34" stop-color="#76E37F"/>
+      <stop offset="0.8" stop-color="#32B845"/>
+      <stop offset="1" stop-color="#146B2C"/>
+    </radialGradient>
+    <filter id="shadow" x="150" y="290" width="724" height="430" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+      <feOffset dy="26"/>
+      <feGaussianBlur stdDeviation="34"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.0156863 0 0 0 0 0.0313725 0 0 0 0 0.054902 0 0 0 0.42 0"/>
+      <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_0_1"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_0_1" result="shape"/>
+    </filter>
+    <filter id="lampGlowRed" x="170" y="344" width="300" height="300" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+      <feGaussianBlur stdDeviation="24" result="effect1_foregroundBlur_0_1"/>
+    </filter>
+    <filter id="lampGlowYellow" x="362" y="344" width="300" height="300" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+      <feGaussianBlur stdDeviation="24" result="effect1_foregroundBlur_0_1"/>
+    </filter>
+    <filter id="lampGlowGreen" x="554" y="344" width="300" height="300" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+      <feGaussianBlur stdDeviation="24" result="effect1_foregroundBlur_0_1"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="224" fill="url(#bgGradient)"/>
+  <rect width="1024" height="1024" rx="224" fill="url(#bgGlowTop)"/>
+  <rect width="1024" height="1024" rx="224" fill="url(#bgGlowBottom)"/>
+  <rect x="42" y="42" width="940" height="940" rx="182" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="10"/>
+
+  <g filter="url(#shadow)">
+    <rect x="218" y="332" width="588" height="282" rx="141" fill="url(#panelGradient)"/>
+    <rect x="218" y="332" width="588" height="282" rx="141" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="8"/>
+    <rect x="240" y="354" width="544" height="238" rx="119" fill="url(#panelInnerGlow)"/>
+    <rect x="240" y="354" width="544" height="238" rx="119" stroke="#FFFFFF" stroke-opacity="0.05" stroke-width="4"/>
+  </g>
+
+  <g opacity="0.5">
+    <path d="M278 402C320 362 380 342 462 342H640C694 342 738 352 774 372" stroke="#FFFFFF" stroke-opacity="0.18" stroke-width="12" stroke-linecap="round"/>
+  </g>
+
+  <g filter="url(#lampGlowRed)">
+    <circle cx="320" cy="494" r="82" fill="#FF4136" fill-opacity="0.46"/>
+  </g>
+  <g filter="url(#lampGlowYellow)">
+    <circle cx="512" cy="494" r="82" fill="#FFCA28" fill-opacity="0.44"/>
+  </g>
+  <g filter="url(#lampGlowGreen)">
+    <circle cx="704" cy="494" r="82" fill="#48D05F" fill-opacity="0.44"/>
+  </g>
+
+  <circle cx="320" cy="494" r="98" fill="url(#bezelGradient)"/>
+  <circle cx="512" cy="494" r="98" fill="url(#bezelGradient)"/>
+  <circle cx="704" cy="494" r="98" fill="url(#bezelGradient)"/>
+
+  <circle cx="320" cy="494" r="86" fill="#080B10" fill-opacity="0.72"/>
+  <circle cx="512" cy="494" r="86" fill="#080B10" fill-opacity="0.72"/>
+  <circle cx="704" cy="494" r="86" fill="#080B10" fill-opacity="0.72"/>
+
+  <circle cx="320" cy="494" r="72" fill="url(#redLamp)"/>
+  <circle cx="512" cy="494" r="72" fill="url(#yellowLamp)"/>
+  <circle cx="704" cy="494" r="72" fill="url(#greenLamp)"/>
+
+  <circle cx="290" cy="464" r="22" fill="#FFFFFF" fill-opacity="0.34"/>
+  <circle cx="482" cy="464" r="22" fill="#FFFFFF" fill-opacity="0.32"/>
+  <circle cx="674" cy="464" r="22" fill="#FFFFFF" fill-opacity="0.3"/>
+
+  <path d="M264 584C296 606 334 618 382 618H642C700 618 746 608 782 584" stroke="#000000" stroke-opacity="0.22" stroke-width="16" stroke-linecap="round"/>
+</svg>

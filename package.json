@@ -1,0 +1,17 @@
+{
+  "name": "codex-status-light-workspace",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test packages/status-engine/test/*.test.mjs",
+    "status:once": "node packages/status-engine/bin/write-status-snapshot.mjs --once --out apps/status-light-shell/web/runtime/current-status.json",
+    "status:watch": "node packages/status-engine/bin/write-status-snapshot.mjs --watch --out apps/status-light-shell/web/runtime/current-status.json",
+    "shell:serve": "node apps/status-light-shell/scripts/serve-web-dashboard.mjs",
+    "shell:dev": "npm --prefix apps/status-light-shell run tauri:dev",
+    "shell:debug": "node apps/status-light-shell/scripts/run-debug-scenario.mjs",
+    "shell:build": "npm --prefix apps/status-light-shell run build",
+    "shell:build:mac": "npm --prefix apps/status-light-shell run build:mac",
+    "shell:build:win": "npm --prefix apps/status-light-shell run build:win",
+    "icons:tray": "node apps/status-light-shell/scripts/generate-tray-state-icons.mjs"
+  }
+}

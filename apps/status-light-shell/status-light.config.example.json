@@ -1,0 +1,16 @@
+{
+  "pollIntervalMs": 1000,
+  "runningStaleMs": 60000,
+  "sources": {
+    "configToml": true,
+    "logFile": true,
+    "logsSqlite": true,
+    "stateSqlite": false
+  },
+  "renderers": {
+    "tray": true,
+    "webhook": false,
+    "hardware": false
+  }
+}
+

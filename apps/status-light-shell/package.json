@@ -1,0 +1,18 @@
+{
+  "name": "codex-status-light-shell",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "debug": "node scripts/run-debug-scenario.mjs",
+    "tauri:dev": "npx tauri dev",
+    "build": "npx tauri build",
+    "build:mac": "npx tauri build --bundles app,dmg",
+    "build:win": "npx tauri build --bundles msi,nsis",
+    "status:once": "node ../../packages/status-engine/bin/write-status-snapshot.mjs --once --out web/runtime/current-status.json",
+    "status:watch": "node ../../packages/status-engine/bin/write-status-snapshot.mjs --watch --out web/runtime/current-status.json",
+    "serve": "node scripts/serve-web-dashboard.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2"
+  }
+}
