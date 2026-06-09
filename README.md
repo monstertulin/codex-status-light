@@ -1,5 +1,7 @@
 # Codex Status Light
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Codex Status Light is a native `macOS` menu bar app and `Windows` system tray app that turns your local Codex runtime into a simple red / yellow / green signal.
 
 It is built for one job: let you glance at the tray and immediately know whether Codex is idle, busy, waiting on you, or stuck.
