@@ -13,10 +13,12 @@ It is built for one job: let you glance at the tray and immediately know whether
 
 ## Download
 
-Download the latest installer or app bundle from [GitHub Releases](https://github.com/monstertulin/codex-status-light/releases).
+When release assets are available, download the latest installer or app bundle from [GitHub Releases](https://github.com/monstertulin/codex-status-light/releases).
 
 - `macOS`: download the `.dmg`
 - `Windows`: download the `.msi` or `NSIS .exe`
+
+If the Releases page is still empty, build from source with the commands below.
 
 Unsigned internal builds may trigger the usual platform warnings:
 
@@ -99,13 +101,3 @@ npm run shell:build:win
 - `packages/status-engine`: status parsing and signal mapping
 - `plugins/codex-status-light`: optional Codex-side helper scaffold
 - `docs`: design notes and signal model
-
-## For maintainers
-
-GitHub Actions is configured to:
-
-- run tests on push and pull request
-- build `macOS` and `Windows` release assets
-- publish release artifacts from tags or manual workflow runs
-
-The release workflow lives in `.github/workflows/release.yml`.
