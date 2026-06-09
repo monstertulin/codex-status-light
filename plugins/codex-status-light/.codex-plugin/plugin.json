@@ -1,0 +1,25 @@
+{
+  "name": "codex-status-light",
+  "version": "0.1.0",
+  "description": "Cross-platform Codex status light plugin scaffold.",
+  "author": {
+    "name": "chentulin"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Status Light",
+    "shortDescription": "Plan and operate a Codex red-yellow-green status light.",
+    "longDescription": "Codex Status Light packages the local docs and workflow for a tray-based Codex runtime indicator across macOS and Windows.",
+    "developerName": "chentulin",
+    "category": "Engineering",
+    "capabilities": [
+      "Interactive",
+      "Read"
+    ],
+    "defaultPrompt": [
+      "Explain the Codex status light architecture.",
+      "Show me how the red, yellow, and green states are derived.",
+      "Help me extend the status-engine rules."
+    ]
+  }
+}

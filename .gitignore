@@ -1,0 +1,12 @@
+node_modules/
+**/node_modules/
+target/
+**/target/
+dist/
+**/dist/
+.DS_Store
+*.log
+.agents/
+.codex/
+apps/status-light-shell/tmp-icons/
+apps/status-light-shell/web/runtime/current-status.json

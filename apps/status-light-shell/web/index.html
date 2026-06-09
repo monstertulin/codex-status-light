@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Codex Status Light</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body data-color="neutral">
+    <main class="app-shell">
+      <section class="status-card">
+        <header class="card-header">
+          <div>
+            <p class="eyebrow">Codex Runtime</p>
+            <p id="meaning-label" class="meaning-label">Waiting for a live signal</p>
+          </div>
+          <div id="status-chip" class="status-chip status-chip-neutral">Neutral</div>
+        </header>
+
+        <section class="hero-panel">
+          <div class="hero-frame">
+            <div class="hero-frame-top">
+              <p class="hero-label">Signal Matrix</p>
+              <p class="hero-mini">Real-time local thread monitor</p>
+            </div>
+            <div class="signal-stage">
+              <div class="signal-rail" aria-hidden="true"></div>
+              <div class="signal-bar" aria-label="Status lights">
+                <div class="signal-node signal-node-green">
+                  <div class="light light-green" aria-hidden="true"></div>
+                  <p class="signal-name">Green</p>
+                  <p class="signal-help">Idle</p>
+                </div>
+                <div class="signal-node signal-node-yellow">
+                  <div class="light light-yellow" aria-hidden="true"></div>
+                  <p class="signal-name">Yellow</p>
+                  <p class="signal-help">Working</p>
+                </div>
+                <div class="signal-node signal-node-red">
+                  <div class="light light-red" aria-hidden="true"></div>
+                  <p class="signal-name">Red</p>
+                  <p class="signal-help">Attention</p>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="headline-panel">
+            <h1 id="state-label">Waiting for snapshot</h1>
+            <p id="reason" class="reason">
+              Start the snapshot writer to render the current Codex state.
+            </p>
+            <p id="substate-label" class="substate-label">
+              The tray watches your local Codex runtime and mirrors its live state here.
+            </p>
+          </div>
+        </section>
+
+        <section class="detail-panel">
+          <div class="detail-header">
+            <p class="section-kicker">Session Snapshot</p>
+            <p class="detail-mini">Last synchronized runtime details</p>
+          </div>
+          <dl class="meta-grid">
+            <div class="meta-card">
+              <dt>Signal</dt>
+              <dd id="color-value">unknown</dd>
+            </div>
+            <div class="meta-card">
+              <dt>Event</dt>
+              <dd id="event-value">startup</dd>
+            </div>
+            <div class="meta-card">
+              <dt>Updated</dt>
+              <dd id="updated-value">n/a</dd>
+            </div>
+            <div class="meta-card meta-card-wide">
+              <dt>Thread</dt>
+              <dd id="thread-value" class="mono">n/a</dd>
+            </div>
+          </dl>
+        </section>
+      </section>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
