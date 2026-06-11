@@ -1,5 +1,6 @@
 const SNAPSHOT_URL = "./runtime/current-status.json";
 const POLL_INTERVAL_MS = 500;
+const TAURI_FALLBACK_POLL_INTERVAL_MS = 5000;
 const MISSING_GRACE_MS = 4000;
 
 const refs = {
@@ -16,52 +17,57 @@ const refs = {
 };
 
 const STATE_LABELS = {
-  idle: "Ready",
-  running: "Working",
-  attention: "Needs Attention",
-  unknown: "Unavailable"
+  idle: "就绪",
+  running: "运行中",
+  attention: "需处理",
+  unknown: "不可用"
 };
 
 const EVENT_LABELS = {
-  startup: "Startup",
-  unavailable: "Unavailable",
-  cooldown: "Settling",
-  turn_completed: "Completed",
-  turn_started: "Turn started",
-  thinking: "Thinking",
-  tool_running: "Running tools",
-  replying: "Replying",
-  network_retry: "Retrying",
-  approval_required: "Awaiting approval",
-  interrupt: "Interrupted",
-  auth_error: "Authentication error",
-  rate_limited: "Rate limited",
-  turn_error: "Turn error",
-  attention_cleared: "Recovered",
-  stalled: "Stalled",
-  running: "Working"
+  startup: "启动中",
+  unavailable: "不可用",
+  cooldown: "收尾中",
+  turn_completed: "已完成",
+  turn_started: "已开始",
+  thinking: "读取中",
+  tool_running: "工具处理中",
+  replying: "回复中",
+  network_retry: "重试中",
+  approval_required: "等待授权",
+  interrupt: "已中断",
+  auth_error: "认证错误",
+  rate_limited: "速率受限",
+  turn_error: "轮次错误",
+  attention_cleared: "已恢复",
+  stalled: "已卡住",
+  running: "运行中"
 };
 
 const COLOR_LABELS = {
-  green: "Green",
-  yellow: "Yellow",
-  red: "Red",
-  neutral: "Neutral"
+  green: "绿灯",
+  yellow: "黄灯",
+  red: "红灯",
+  neutral: "灰灯"
 };
 
 function isMissingLocalRuntimeData(snapshot = {}) {
-  const reason = (snapshot.reason ?? "").toLowerCase();
+  const reason = snapshot.reason ?? "";
   return (
-    reason.includes("no local codex runtime data") ||
-    reason.includes("no local codex log file") ||
-    reason.includes("has not created any local threads") ||
-    reason.includes("does not contain runtime events yet") ||
-    reason.includes("does not contain a recognizable runtime event")
+    reason.includes("未发现本地 Codex 运行数据") ||
+    reason.includes("未找到本地 Codex 日志文件") ||
+    reason.includes("还没有创建任何本地线程") ||
+    reason.includes("还没有运行时事件") ||
+    reason.includes("还没有可识别的运行时事件") ||
+    reason.toLowerCase().includes("no local codex runtime data") ||
+    reason.toLowerCase().includes("no local codex log file") ||
+    reason.toLowerCase().includes("has not created any local threads") ||
+    reason.toLowerCase().includes("does not contain runtime events yet") ||
+    reason.toLowerCase().includes("does not contain a recognizable runtime event")
   );
 }
 
 function colorLabelFor(color) {
-  return COLOR_LABELS[color] ?? color ?? "Unknown";
+  return COLOR_LABELS[color] ?? color ?? "未知";
 }
 
 function phaseGroupFor(snapshot = {}) {
@@ -108,48 +114,48 @@ function headlineFor(snapshot) {
     return eventLabelFor(snapshot.lastEventKind);
   }
 
-  return STATE_LABELS[snapshot.state] ?? "Unknown";
+  return STATE_LABELS[snapshot.state] ?? "未知";
 }
 
 function toneLabelFor(snapshot) {
   switch (snapshot.lastEventKind) {
     case "approval_required":
-      return "Waiting for your approval";
+      return "等待你的授权";
     case "thinking":
-      return "Reasoning in progress";
+      return "正在读取上下文";
     case "tool_running":
-      return "Tool execution in progress";
+      return "正在执行工具";
     case "replying":
-      return "Drafting the reply";
+      return "正在生成回复";
     case "network_retry":
-      return "Retrying the model request";
+      return "正在重试模型请求";
     case "cooldown":
-      return "Settling after completion";
+      return "完成后短暂停留";
     case "interrupt":
-      return "Turn was interrupted";
+      return "当前轮次已被中断";
     case "auth_error":
-      return "Authentication issue";
+      return "认证异常";
     case "rate_limited":
-      return "Rate limited";
+      return "速率受限";
     case "turn_error":
-      return "Turn failed";
+      return "当前轮次失败";
     case "stalled":
-      return "Possibly stalled";
+      return "可能已卡住";
     case "unavailable":
       if (isMissingLocalRuntimeData(snapshot)) {
-        return "No local Codex data yet";
+        return "本地还没有 Codex 运行数据";
       }
-      return "Signal temporarily unavailable";
+      return "状态信号暂时不可用";
     default:
       switch (snapshot.color) {
         case "green":
-          return "Stable and ready";
+          return "状态稳定，随时可用";
         case "yellow":
-          return "Live activity in progress";
+          return "当前正在处理中";
         case "red":
-          return "Attention may be needed";
+          return "当前需要关注";
         default:
-          return "Waiting for a live signal";
+          return "等待可用状态信号";
       }
   }
 }
@@ -157,42 +163,42 @@ function toneLabelFor(snapshot) {
 function supportLabelFor(snapshot) {
   switch (snapshot.lastEventKind) {
     case "approval_required":
-      return "The yellow lamp is flashing: Codex is paused on an approval gate and is waiting for you to allow the next step.";
+      return "黄灯闪烁：Codex 暂停在授权步骤，正在等待你允许下一步操作。";
     case "thinking":
-      return "The yellow lamp is active: Codex is still reasoning and has not started replying yet.";
+      return "黄灯亮起：Codex 正在读取上下文，并在回复前准备下一步。";
     case "tool_running":
-      return "The yellow lamp is active: Codex is calling or streaming tool execution output.";
+      return "黄灯亮起：Codex 正在调用工具或接收工具执行输出。";
     case "replying":
-      return "The yellow lamp is active: Codex is actively generating the reply.";
+      return "黄灯亮起：Codex 正在生成回复。";
     case "network_retry":
-      return "The yellow lamp is active: Codex is retrying a model request and may escalate to red if that stays quiet too long.";
+      return "黄灯亮起：Codex 正在重试模型请求，如果长时间没有新进展，可能会转成红灯。";
     case "cooldown":
-      return "The yellow lamp is briefly held after completion so the state change feels natural instead of snapping instantly to green.";
+      return "黄灯会在完成后短暂停留，让状态切换更自然，而不是立刻跳回绿灯。";
     case "interrupt":
-      return "The red lamp is active: the current turn was interrupted and Codex is waiting for the next action.";
+      return "红灯亮起：当前轮次已被中断，Codex 正在等待下一步操作。";
     case "auth_error":
-      return "The red lamp is active: Codex hit an authentication problem and needs account or token attention.";
+      return "红灯亮起：Codex 遇到了认证问题，需要检查账号或令牌。";
     case "rate_limited":
-      return "The red lamp is active: Codex hit a rate limit and could not continue normally.";
+      return "红灯亮起：Codex 遇到了速率限制，暂时无法正常继续。";
     case "turn_error":
-      return "The red lamp is active: the last turn failed unexpectedly and likely needs action before Codex can continue cleanly.";
+      return "红灯亮起：上一轮意外失败，通常需要处理后才能继续顺畅运行。";
     case "stalled":
-      return "The red lamp is active: Codex started work earlier, but fresh output has been quiet for too long, so this looks more like a stall than an immediate hard error.";
+      return "红灯亮起：Codex 之前已经开始工作，但长时间没有新输出，这更像是卡住了，而不是立即报硬错误。";
     case "unavailable":
       if (isMissingLocalRuntimeData(snapshot)) {
-        return "The neutral state is active: this machine has not produced usable local Codex runtime data yet, so the tray cannot infer a live status.";
+        return "灰灯亮起：这台机器还没有产生可用的本地 Codex 运行数据，所以托盘暂时无法判断实时状态。";
       }
-      return "The neutral state is active: the app could not read a reliable runtime signal just now.";
+      return "灰灯亮起：应用刚刚没能读到可靠的运行时信号。";
     default:
       switch (snapshot.color) {
         case "green":
-          return "The green lamp is active: Codex is idle or the last turn has fully settled.";
+          return "绿灯亮起：Codex 当前空闲，或上一轮已经完全稳定结束。";
         case "yellow":
-          return "The yellow lamp is active: Codex is working through an active turn.";
+          return "黄灯亮起：Codex 正在处理当前轮次。";
         case "red":
-          return "The red lamp is active: Codex needs attention.";
+          return "红灯亮起：Codex 当前需要关注。";
         default:
-          return "Start the snapshot writer to feed live Codex state into this panel.";
+          return "请启动快照写入器，把实时 Codex 状态传给这个面板。";
       }
   }
 }
@@ -257,14 +263,14 @@ function renderMissingState(force = false) {
     state: "unknown",
     lastEventKind: "startup"
   });
-  refs.meaningLabel.textContent = "Waiting for a live signal";
-  refs.stateLabel.textContent = "Waiting for snapshot";
+  refs.meaningLabel.textContent = "等待实时状态";
+  refs.stateLabel.textContent = "等待状态快照";
   refs.reason.textContent =
-    "Run the snapshot writer so the dashboard can read the current Codex status.";
+    "请启动快照写入器，让面板能够读取当前 Codex 状态。";
   refs.substateLabel.textContent =
-    "The tray watches your local Codex runtime and mirrors its live state here.";
-  refs.colorValue.textContent = "Neutral";
-  refs.eventValue.textContent = "Startup";
+    "托盘会监控你本地的 Codex 运行状态，并把实时状态同步到这里。";
+  refs.colorValue.textContent = "灰灯";
+  refs.eventValue.textContent = "启动中";
   refs.threadValue.textContent = "n/a";
   refs.updatedValue.textContent = "n/a";
   refs.threadValue.title = "";
@@ -282,7 +288,7 @@ function renderSnapshot(snapshot) {
   applyTone(snapshot);
   refs.meaningLabel.textContent = toneLabelFor(snapshot);
   refs.stateLabel.textContent = headlineFor(snapshot);
-  refs.reason.textContent = snapshot.reason ?? "No reason supplied";
+  refs.reason.textContent = snapshot.reason ?? "暂无状态说明";
   refs.substateLabel.textContent = supportLabelFor(snapshot);
   refs.colorValue.textContent = colorLabelFor(snapshot.color);
   refs.eventValue.textContent = eventLabelFor(snapshot.lastEventKind);
@@ -306,6 +312,12 @@ async function loadSnapshotFromTauri() {
   }
 
   return invoke("read_status_snapshot");
+}
+
+function hasTauriBridge() {
+  return Boolean(
+    window.__TAURI_INTERNALS__?.invoke ?? window.__TAURI__?.core?.invoke
+  );
 }
 
 async function loadSnapshot() {
@@ -354,4 +366,17 @@ if (initialEmbeddedSnapshot) {
 }
 
 loadSnapshot();
-window.setInterval(loadSnapshot, POLL_INTERVAL_MS);
+
+if (hasTauriBridge()) {
+  window.addEventListener("focus", () => {
+    void loadSnapshot();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      void loadSnapshot();
+    }
+  });
+  window.setInterval(loadSnapshot, TAURI_FALLBACK_POLL_INTERVAL_MS);
+} else {
+  window.setInterval(loadSnapshot, POLL_INTERVAL_MS);
+}

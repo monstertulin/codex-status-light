@@ -11,7 +11,7 @@ import { classifyLogLine } from "./log-events.mjs";
 export function createInitialStatus(now = Date.now()) {
   return createSnapshot({
     state: LIGHT_STATES.IDLE,
-    reason: "waiting for Codex activity",
+    reason: "等待 Codex 活动",
     lastEventKind: "startup",
     lastEventAt: now,
     threadId: null
@@ -21,43 +21,51 @@ export function createInitialStatus(now = Date.now()) {
 function runningReason(kind) {
   switch (kind) {
     case "turn_started":
-      return "Codex started a new turn";
+      return "Codex 已开始新一轮";
     case "thinking":
-      return "Codex is thinking";
+      return "Codex 正在读取上下文";
     case "tool_running":
-      return "Codex is running tools";
+      return "Codex 正在运行工具";
     case "replying":
-      return "Codex is writing the reply";
+      return "Codex 正在生成回复";
     case "network_retry":
-      return "Codex is retrying the model request";
+      return "Codex 正在重试模型请求";
     default:
-      return "Codex is actively working";
+      return "Codex 正在工作";
   }
 }
 
 function attentionReason(kind) {
   switch (kind) {
     case "interrupt":
-      return "turn was interrupted";
+      return "当前轮次已被中断";
     case "auth_error":
-      return "Codex authentication failed";
+      return "Codex 认证失败";
     case "rate_limited":
-      return "Codex hit a rate limit";
+      return "Codex 遇到速率限制";
     default:
-      return "Codex hit a turn error";
+      return "Codex 当前轮次出错";
   }
 }
 
 function stalledReason(lastEventKind) {
   if (lastEventKind === "network_retry") {
-    return "Codex has been retrying for too long";
+    return "Codex 重试时间过长";
+  }
+
+  if (lastEventKind === "thinking") {
+    return "读取状态过久没有新进展";
   }
 
   if (lastEventKind === "tool_running") {
-    return "tool execution has been quiet for too long";
+    return "工具执行过久没有新进展";
   }
 
-  return "Codex appears stalled";
+  if (lastEventKind === "replying") {
+    return "回复生成过久没有新进展";
+  }
+
+  return "Codex 似乎已卡住";
 }
 
 function isTransientAttention(kind) {
@@ -88,13 +96,13 @@ function attentionHoldMs(kind, options) {
 function idleReasonAfterAttention(kind) {
   switch (kind) {
     case "interrupt":
-      return "waiting for the next turn";
+      return "等待下一轮开始";
     case "auth_error":
-      return "last authentication issue is no longer active";
+      return "上一次认证问题已恢复";
     case "rate_limited":
-      return "last rate limit is no longer active";
+      return "上一次速率限制已恢复";
     default:
-      return "last turn error is no longer active";
+      return "上一次轮次错误已恢复";
   }
 }
 
@@ -107,7 +115,7 @@ export function reduceEvent(currentStatus, event, options = {}) {
     case "turn_completed":
       return createSnapshot({
         state: LIGHT_STATES.RUNNING,
-        reason: "Codex just finished; holding yellow briefly",
+        reason: "Codex 刚完成任务，黄灯会短暂停留",
         lastEventKind: "cooldown",
         lastEventAt: at,
         threadId
@@ -167,7 +175,7 @@ export function deriveStatus(currentStatus, options = {}) {
 
     return createSnapshot({
       state: LIGHT_STATES.IDLE,
-      reason: "turn completed",
+      reason: "本轮已完成",
       lastEventKind: "turn_completed",
       lastEventAt: currentStatus.lastEventAt,
       threadId: currentStatus.threadId

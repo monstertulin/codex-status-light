@@ -70,7 +70,7 @@ test("running transitions the light to yellow", () => {
 
   assert.equal(next.state, LIGHT_STATES.RUNNING);
   assert.equal(next.color, LIGHT_COLORS[LIGHT_STATES.RUNNING]);
-  assert.equal(next.reason, "Codex started a new turn");
+  assert.equal(next.reason, "Codex 已开始新一轮");
 });
 
 test("response.in_progress keeps the light yellow", () => {
@@ -82,7 +82,7 @@ test("response.in_progress keeps the light yellow", () => {
   assert.equal(running.state, LIGHT_STATES.RUNNING);
   assert.equal(running.threadId, "abc-123");
   assert.equal(running.lastEventKind, "thinking");
-  assert.equal(running.reason, "Codex is thinking");
+  assert.equal(running.reason, "Codex 正在读取上下文");
 });
 
 test("function call activity is labeled as tool work", () => {
@@ -93,7 +93,7 @@ test("function call activity is labeled as tool work", () => {
 
   assert.equal(running.state, LIGHT_STATES.RUNNING);
   assert.equal(running.lastEventKind, "tool_running");
-  assert.equal(running.reason, "Codex is running tools");
+  assert.equal(running.reason, "Codex 正在运行工具");
 });
 
 test("completion holds the light yellow briefly", () => {
@@ -109,7 +109,7 @@ test("completion holds the light yellow briefly", () => {
   assert.equal(done.state, LIGHT_STATES.RUNNING);
   assert.equal(done.color, LIGHT_COLORS[LIGHT_STATES.RUNNING]);
   assert.equal(done.lastEventKind, "cooldown");
-  assert.equal(done.reason, "Codex just finished; holding yellow briefly");
+  assert.equal(done.reason, "Codex 刚完成任务，黄灯会短暂停留");
 });
 
 test("completion hold expires back to green", () => {
@@ -124,7 +124,7 @@ test("completion hold expires back to green", () => {
 
   assert.equal(settled.state, LIGHT_STATES.IDLE);
   assert.equal(settled.lastEventKind, "turn_completed");
-  assert.equal(settled.reason, "turn completed");
+  assert.equal(settled.reason, "本轮已完成");
 });
 
 test("interrupt transitions the light to red", () => {
@@ -149,7 +149,7 @@ test("interrupt attention clears after a short hold", () => {
 
   assert.equal(cleared.state, LIGHT_STATES.IDLE);
   assert.equal(cleared.lastEventKind, "attention_cleared");
-  assert.equal(cleared.reason, "waiting for the next turn");
+  assert.equal(cleared.reason, "等待下一轮开始");
 });
 
 test("authentication failures transition the light to red", () => {
@@ -160,7 +160,7 @@ test("authentication failures transition the light to red", () => {
 
   assert.equal(failed.state, LIGHT_STATES.ATTENTION);
   assert.equal(failed.lastEventKind, "auth_error");
-  assert.equal(failed.reason, "Codex authentication failed");
+  assert.equal(failed.reason, "Codex 认证失败");
 });
 
 test("turn errors stay red for a longer hold before clearing", () => {

@@ -9,7 +9,7 @@ const MACOS_OUTPUT_DIR = path.resolve(
   "apps/status-light-shell/src-tauri/icons/state-macos"
 );
 
-const STATES = ["green", "yellow", "red", "neutral"];
+const STATES = ["green", "yellow", "yellow_dim", "red", "neutral"];
 
 const FRAME_FILL = [18, 28, 35];
 const FRAME_GLOSS = [255, 255, 255];
@@ -109,6 +109,14 @@ function dimColor(base, amount) {
   );
 }
 
+function activeLampKeyForState(activeState) {
+  return activeState.endsWith("_dim") ? activeState.slice(0, -4) : activeState;
+}
+
+function isDimmedActiveState(activeState) {
+  return activeState.endsWith("_dim");
+}
+
 function ringAlpha(x, y, cx, cy, outerRadius, innerRadius, outerFeather = 1, innerFeather = 1) {
   return clamp(
     circleSoftAlpha(x, y, cx, cy, outerRadius, outerFeather) -
@@ -144,12 +152,12 @@ function squareVariant() {
         compositePixel(px, FRAME_GLOSS, 0.05 * glossMask);
       }
     },
-    lampStyle(isActive, isNeutral) {
+    lampStyle(isActive, isNeutral, isDimmed = false) {
       return {
         glowRadius: 11.6,
         glowSpread: 11.4,
-        glowIntensity: isActive ? 0.44 : isNeutral ? 0.07 : 0.11,
-        bodyRadius: isActive ? 11.1 : 10.5,
+        glowIntensity: isActive ? (isDimmed ? 0.24 : 0.44) : isNeutral ? 0.07 : 0.11,
+        bodyRadius: isActive ? (isDimmed ? 10.9 : 11.1) : 10.5,
         bodyFeather: 1.5,
         rimOuter: 12.4,
         rimInner: 10.8,
@@ -159,28 +167,28 @@ function squareVariant() {
         shineY: -3.8,
         shineRadius: 3.8,
         shineFeather: 1.05,
-        dimAmount: isNeutral ? 0.58 : 0.42,
-        bodyAlpha: isActive ? 1 : 0.68,
-        highlightAmount: isActive ? 0.2 : 0.06,
-        ringAlpha: isActive ? 0.28 : 0.14,
-        shineAlpha: isActive ? 0.34 : 0.12,
+        dimAmount: isNeutral ? 0.58 : isDimmed ? 0.24 : 0.42,
+        bodyAlpha: isActive ? (isDimmed ? 0.82 : 1) : 0.68,
+        highlightAmount: isActive ? (isDimmed ? 0.11 : 0.2) : 0.06,
+        ringAlpha: isActive ? (isDimmed ? 0.19 : 0.28) : 0.14,
+        shineAlpha: isActive ? (isDimmed ? 0.2 : 0.34) : 0.12,
         rimAlpha: 0.18,
-        coreRadius: isActive ? 4.6 : 4.1,
-        coreAlpha: isActive ? 0.22 : 0.08,
+        coreRadius: isActive ? (isDimmed ? 4.35 : 4.6) : 4.1,
+        coreAlpha: isActive ? (isDimmed ? 0.12 : 0.22) : 0.08,
         seatGlowRadius: 11.4,
         seatGlowSpread: 6.2,
-        seatGlowAlpha: isActive ? 0.14 : 0.03,
+        seatGlowAlpha: isActive ? (isDimmed ? 0.08 : 0.14) : 0.03,
         seatOuter: 12.7,
         seatInner: 10.8,
-        seatAlpha: isActive ? 0.16 : 0.04,
-        seatTint: isActive ? 0.42 : 0.26,
-        rimTint: isActive ? 0.34 : 0.18,
-        shadowTint: isActive ? 0.12 : 0.22,
-        bodyBaseAlpha: isActive ? 0.36 : 0.16,
-        highlightRadius: isActive ? 4.8 : 4.2,
+        seatAlpha: isActive ? (isDimmed ? 0.09 : 0.16) : 0.04,
+        seatTint: isActive ? (isDimmed ? 0.32 : 0.42) : 0.26,
+        rimTint: isActive ? (isDimmed ? 0.24 : 0.34) : 0.18,
+        shadowTint: isActive ? (isDimmed ? 0.18 : 0.12) : 0.22,
+        bodyBaseAlpha: isActive ? (isDimmed ? 0.26 : 0.36) : 0.16,
+        highlightRadius: isActive ? (isDimmed ? 4.5 : 4.8) : 4.2,
         highlightX: -0.8,
         highlightY: -1.9,
-        highlightAlpha: isActive ? 0.18 : 0.08,
+        highlightAlpha: isActive ? (isDimmed ? 0.11 : 0.18) : 0.08,
         neutralTint: 0.26,
         inactiveTint: 0.2
       };
@@ -316,9 +324,11 @@ function macosVariant() {
       }
     },
     drawLamp(px, x, y, lamp, activeState) {
-      const isActive = lamp.key === activeState;
+      const activeLampKey = activeLampKeyForState(activeState);
+      const isActive = lamp.key === activeLampKey;
       const isNeutral = activeState === "neutral";
-      const glowStrength = isActive ? 0.68 : isNeutral ? 0.07 : 0.03;
+      const isDimmed = isActive && isDimmedActiveState(activeState);
+      const glowStrength = isActive ? (isDimmed ? 0.34 : 0.68) : isNeutral ? 0.07 : 0.03;
       const seatGlow = glowAlpha(
         x,
         y,
@@ -437,7 +447,7 @@ function macosVariant() {
         lamp.y - scaled(0.7),
         scaled(5.8),
         scaled(2.8),
-        isActive ? 0.24 : isNeutral ? 0.022 : 0.035
+        isActive ? (isDimmed ? 0.14 : 0.24) : isNeutral ? 0.022 : 0.035
       );
       const lowerReflect = circleSoftAlpha(
         x,
@@ -451,10 +461,10 @@ function macosVariant() {
       const bodyColor = isNeutral
         ? blendColor(lamp.color, [76, 86, 96], 0.62)
         : isActive
-          ? blendColor(lamp.color, [255, 255, 255], 0.12)
+          ? blendColor(lamp.color, [255, 255, 255], isDimmed ? 0.06 : 0.12)
           : blendColor(lamp.color, [44, 52, 60], 0.74);
       const glowColor = isActive
-        ? blendColor(lamp.glowColor, [255, 255, 255], 0.16)
+        ? blendColor(lamp.glowColor, [255, 255, 255], isDimmed ? 0.08 : 0.16)
         : blendColor(lamp.glowColor, [90, 98, 108], 0.7);
 
       const outerGlow = glowAlpha(
@@ -473,54 +483,72 @@ function macosVariant() {
         compositePixel(px, pastelColor(lamp.glowColor, 0.84), upperHalo);
       }
 
-      compositePixel(px, bodyColor, body * (isActive ? 0.998 : isNeutral ? 0.28 : 0.42));
       compositePixel(
         px,
-        shadeColor(bodyColor, isActive ? 0.12 : 0.26),
-        bodyShadow * body * (isActive ? 0.22 : 0.16)
+        bodyColor,
+        body * (isActive ? (isDimmed ? 0.82 : 0.998) : isNeutral ? 0.28 : 0.42)
       );
       compositePixel(
         px,
-        highlightColor(bodyColor, isActive ? 0.38 : 0.08),
-        topBloom * body * (isActive ? 0.44 : 0.08)
+        shadeColor(bodyColor, isActive ? (isDimmed ? 0.18 : 0.12) : 0.26),
+        bodyShadow * body * (isActive ? (isDimmed ? 0.18 : 0.22) : 0.16)
+      );
+      compositePixel(
+        px,
+        highlightColor(bodyColor, isActive ? (isDimmed ? 0.24 : 0.38) : 0.08),
+        topBloom * body * (isActive ? (isDimmed ? 0.24 : 0.44) : 0.08)
       );
       if (haloRing > 0) {
         compositePixel(
           px,
           pastelColor(lamp.glowColor, 0.82),
-          haloRing * (isActive ? 0.28 : isNeutral ? 0.03 : 0.04)
+          haloRing * (isActive ? (isDimmed ? 0.16 : 0.28) : isNeutral ? 0.03 : 0.04)
         );
       }
       if (glassWash > 0) {
         compositePixel(
           px,
-          highlightColor(bodyColor, isActive ? 0.5 : 0.1),
-          glassWash * body * (isActive ? 0.34 : 0.06)
+          highlightColor(bodyColor, isActive ? (isDimmed ? 0.28 : 0.5) : 0.1),
+          glassWash * body * (isActive ? (isDimmed ? 0.18 : 0.34) : 0.06)
         );
       }
       if (innerLift > 0) {
-        compositePixel(px, FRAME_GLOSS, innerLift * body * (isActive ? 0.26 : 0.05));
+        compositePixel(
+          px,
+          FRAME_GLOSS,
+          innerLift * body * (isActive ? (isDimmed ? 0.14 : 0.26) : 0.05)
+        );
       }
       if (lowerReflect > 0) {
         compositePixel(
           px,
-          shadeColor(bodyColor, isActive ? 0.08 : 0.18),
-          lowerReflect * body * (isActive ? 0.11 : 0.03)
+          shadeColor(bodyColor, isActive ? (isDimmed ? 0.13 : 0.08) : 0.18),
+          lowerReflect * body * (isActive ? (isDimmed ? 0.06 : 0.11) : 0.03)
         );
       }
-      compositePixel(px, FRAME_GLOSS, highlight * (isActive ? 0.58 : isNeutral ? 0.1 : 0.13));
       compositePixel(
         px,
         FRAME_GLOSS,
-        coreGlow * body * (isActive ? 0.48 : isNeutral ? 0.06 : 0.08)
+        highlight * (isActive ? (isDimmed ? 0.32 : 0.58) : isNeutral ? 0.1 : 0.13)
       );
-      compositePixel(px, pastelColor(bodyColor, 0.54), ring * (isActive ? 0.3 : 0.04));
+      compositePixel(
+        px,
+        FRAME_GLOSS,
+        coreGlow * body * (isActive ? (isDimmed ? 0.22 : 0.48) : isNeutral ? 0.06 : 0.08)
+      );
+      compositePixel(
+        px,
+        pastelColor(bodyColor, 0.54),
+        ring * (isActive ? (isDimmed ? 0.18 : 0.3) : 0.04)
+      );
     }
   };
 }
 
 function createStateImage(activeState, variant) {
   const pixels = new Uint8Array(variant.width * variant.height * 4);
+  const activeLampKey = activeLampKeyForState(activeState);
+  const dimmedActive = isDimmedActiveState(activeState);
 
   for (let y = 0; y < variant.height; y += 1) {
     for (let x = 0; x < variant.width; x += 1) {
@@ -535,9 +563,10 @@ function createStateImage(activeState, variant) {
           continue;
         }
 
-        const isActive = lamp.key === activeState;
+        const isActive = lamp.key === activeLampKey;
         const isNeutral = activeState === "neutral";
-        const style = variant.lampStyle(isActive, isNeutral);
+        const isDimmed = isActive && dimmedActive;
+        const style = variant.lampStyle(isActive, isNeutral, isDimmed);
         const glow = glowAlpha(
           x,
           y,

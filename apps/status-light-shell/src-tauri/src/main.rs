@@ -10,6 +10,7 @@ use std::{
     env,
     path::Path,
     process::Command,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -19,6 +20,23 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, WindowEvent, Wry,
 };
+
+#[derive(Clone, Default)]
+struct SnapshotStore {
+    current: Arc<Mutex<Option<StatusSnapshot>>>,
+}
+
+impl SnapshotStore {
+    fn read(&self) -> Option<StatusSnapshot> {
+        self.current.lock().ok().and_then(|snapshot| snapshot.clone())
+    }
+
+    fn write(&self, snapshot: StatusSnapshot) {
+        if let Ok(mut current) = self.current.lock() {
+            *current = Some(snapshot);
+        }
+    }
+}
 
 fn push_snapshot_to_window(app: &AppHandle<Wry>, snapshot: &StatusSnapshot) -> Result<(), String> {
     let payload = serde_json::to_string(snapshot)
@@ -74,7 +92,7 @@ fn open_path(path: &Path) -> Result<(), String> {
 
 fn tooltip_for(snapshot: &StatusSnapshot) -> String {
     format!(
-        "Codex Status Light\n{}\n{}\n{}",
+        "Codex 状态灯\n{}\n{}\n{}",
         menu_label_for(snapshot),
         state_line_for(snapshot),
         snapshot.reason
@@ -83,7 +101,7 @@ fn tooltip_for(snapshot: &StatusSnapshot) -> String {
 
 fn menu_label_for(snapshot: &StatusSnapshot) -> String {
     format!(
-        "Current: {} · {}",
+        "当前状态：{} · {}",
         color_label_for(&snapshot.color),
         event_label_for(&snapshot.last_event_kind)
     )
@@ -91,45 +109,45 @@ fn menu_label_for(snapshot: &StatusSnapshot) -> String {
 
 fn color_label_for(color: &str) -> &str {
     match color {
-        "green" => "Green",
-        "yellow" => "Yellow",
-        "red" => "Red",
-        _ => "Neutral",
+        "green" => "绿灯",
+        "yellow" => "黄灯",
+        "red" => "红灯",
+        _ => "灰灯",
     }
 }
 
 fn state_label_for(state: &str) -> &str {
     match state {
-        "idle" => "Ready",
-        "running" => "Working",
-        "attention" => "Needs attention",
-        _ => "Unavailable",
+        "idle" => "就绪",
+        "running" => "运行中",
+        "attention" => "需处理",
+        _ => "不可用",
     }
 }
 
 fn state_line_for(snapshot: &StatusSnapshot) -> String {
-    format!("State: {}", state_label_for(&snapshot.state))
+    format!("状态：{}", state_label_for(&snapshot.state))
 }
 
 fn event_label_for(kind: &str) -> &str {
     match kind {
-        "startup" => "Startup",
-        "unavailable" => "Unavailable",
-        "cooldown" => "Settling",
-        "turn_completed" => "Completed",
-        "turn_started" => "Turn started",
-        "thinking" => "Thinking",
-        "tool_running" => "Running tools",
-        "replying" => "Replying",
-        "network_retry" => "Retrying",
-        "approval_required" => "Awaiting approval",
-        "interrupt" => "Interrupted",
-        "auth_error" => "Authentication error",
-        "rate_limited" => "Rate limited",
-        "turn_error" => "Turn error",
-        "attention_cleared" => "Recovered",
-        "stalled" => "Stalled",
-        "running" => "Working",
+        "startup" => "启动中",
+        "unavailable" => "不可用",
+        "cooldown" => "收尾中",
+        "turn_completed" => "已完成",
+        "turn_started" => "已开始",
+        "thinking" => "读取中",
+        "tool_running" => "工具处理中",
+        "replying" => "回复中",
+        "network_retry" => "重试中",
+        "approval_required" => "等待授权",
+        "interrupt" => "已中断",
+        "auth_error" => "认证错误",
+        "rate_limited" => "速率受限",
+        "turn_error" => "轮次错误",
+        "attention_cleared" => "已恢复",
+        "stalled" => "已卡住",
+        "running" => "运行中",
         _ => kind,
     }
 }
@@ -139,6 +157,7 @@ fn icon_bytes_for_color(color: &str) -> &'static [u8] {
     match color {
         "green" => include_bytes!("../icons/state-macos/green.png"),
         "yellow" => include_bytes!("../icons/state-macos/yellow.png"),
+        "yellow_dim" => include_bytes!("../icons/state-macos/yellow_dim.png"),
         "red" => include_bytes!("../icons/state-macos/red.png"),
         _ => include_bytes!("../icons/state-macos/neutral.png"),
     }
@@ -149,6 +168,7 @@ fn icon_bytes_for_color(color: &str) -> &'static [u8] {
     match color {
         "green" => include_bytes!("../icons/state/green.png"),
         "yellow" => include_bytes!("../icons/state/yellow.png"),
+        "yellow_dim" => include_bytes!("../icons/state/yellow_dim.png"),
         "red" => include_bytes!("../icons/state/red.png"),
         _ => include_bytes!("../icons/state/neutral.png"),
     }
@@ -160,7 +180,7 @@ fn tray_image_for_color(color: &str) -> Result<Image<'static>, String> {
 }
 
 const DEFAULT_ACTIVE_POLL_MS: u64 = 400;
-const DEFAULT_APPROVAL_POLL_MS: u64 = 380;
+const DEFAULT_APPROVAL_POLL_MS: u64 = 500;
 const DEFAULT_IDLE_POLL_MS: u64 = 900;
 const DEFAULT_UNAVAILABLE_GRACE_MS: u64 = 4_000;
 const MIN_POLL_MS: u64 = 250;
@@ -208,9 +228,9 @@ fn snapshot_signature(snapshot: &StatusSnapshot) -> String {
     )
 }
 
-fn tray_icon_color(snapshot: &StatusSnapshot, flash_on: bool) -> &str {
+fn tray_icon_variant(snapshot: &StatusSnapshot, flash_on: bool) -> &str {
     if snapshot.last_event_kind == "approval_required" && !flash_on {
-        "neutral"
+        "yellow_dim"
     } else {
         &snapshot.color
     }
@@ -257,9 +277,11 @@ fn sync_tray_state(
     flash_on: bool,
     last_signature: &mut Option<String>,
     last_icon_color: &mut Option<String>,
+    snapshot_store: &SnapshotStore,
 ) -> Result<StatusSnapshot, String> {
     let snapshot = read_live_status_snapshot()?;
-    let icon_color = tray_icon_color(&snapshot, flash_on).to_string();
+    snapshot_store.write(snapshot.clone());
+    let icon_color = tray_icon_variant(&snapshot, flash_on).to_string();
 
     if last_signature.as_ref() == Some(&snapshot_signature(&snapshot))
         && last_icon_color.as_ref() == Some(&icon_color)
@@ -283,6 +305,7 @@ fn spawn_tray_sync(
     state_item: MenuItem<Wry>,
     initial_signature: Option<String>,
     initial_snapshot: Option<StatusSnapshot>,
+    snapshot_store: SnapshotStore,
 ) {
     thread::spawn(move || {
         let mut last_signature = initial_signature;
@@ -299,6 +322,7 @@ fn spawn_tray_sync(
                 flash_on,
                 &mut last_signature,
                 &mut last_icon_color,
+                &snapshot_store,
             ) {
                 Ok(snapshot) => {
                     last_good_snapshot = Some(snapshot.clone());
@@ -316,7 +340,7 @@ fn spawn_tray_sync(
                     {
                         if last_success_at.elapsed() <= unavailable_grace {
                             let retained_icon_color =
-                                tray_icon_color(snapshot, flash_on).to_string();
+                                tray_icon_variant(snapshot, flash_on).to_string();
                             let _ = apply_snapshot_to_tray(
                                 &app,
                                 &state_item,
@@ -336,8 +360,9 @@ fn spawn_tray_sync(
                     }
 
                     let snapshot = StatusSnapshot::unavailable(format!(
-                        "Status temporarily unavailable: {error}"
+                        "状态暂时不可用：{error}"
                     ));
+                    snapshot_store.write(snapshot.clone());
                     let _ = apply_snapshot_to_tray(
                         &app,
                         &state_item,
@@ -369,15 +394,28 @@ fn should_open_window_on_launch() -> bool {
 }
 
 #[tauri::command]
-fn read_status_snapshot(app: AppHandle<Wry>) -> Result<StatusSnapshot, String> {
-    let _ = app;
+fn read_status_snapshot(
+    app: AppHandle<Wry>,
+    snapshot_store: tauri::State<'_, SnapshotStore>,
+) -> Result<StatusSnapshot, String> {
+    if let Some(snapshot) = snapshot_store.read() {
+        return Ok(snapshot);
+    }
+
     let snapshot = read_live_status_snapshot()?;
+    snapshot_store.write(snapshot.clone());
     let _ = write_snapshot_file(&snapshot);
+    let _ = push_snapshot_to_window(&app, &snapshot);
     Ok(snapshot)
 }
 
 fn show_main_window(app: &AppHandle<Wry>) {
-    if let Ok(snapshot) = read_live_status_snapshot() {
+    let snapshot = app
+        .state::<SnapshotStore>()
+        .read()
+        .or_else(|| read_live_status_snapshot().ok());
+
+    if let Some(snapshot) = snapshot {
         let _ = push_snapshot_to_window(app, &snapshot);
     }
 
@@ -390,16 +428,18 @@ fn show_main_window(app: &AppHandle<Wry>) {
 
 fn main() {
     tauri::Builder::default()
+        .manage(SnapshotStore::default())
         .invoke_handler(tauri::generate_handler![read_status_snapshot])
         .setup(|app| {
+            let snapshot_store = app.state::<SnapshotStore>().inner().clone();
             let state_item =
-                MenuItem::with_id(app, "state", "Current: BOOTING", false, None::<&str>)?;
-            let open_item = MenuItem::with_id(app, "open", "Open Status Light", true, None::<&str>)?;
+                MenuItem::with_id(app, "state", "当前状态：启动中", false, None::<&str>)?;
+            let open_item = MenuItem::with_id(app, "open", "打开状态灯", true, None::<&str>)?;
             let open_snapshot_item =
-                MenuItem::with_id(app, "open_snapshot", "Open Snapshot", true, None::<&str>)?;
+                MenuItem::with_id(app, "open_snapshot", "打开快照", true, None::<&str>)?;
             let open_codex_log_item =
-                MenuItem::with_id(app, "open_codex_log", "Open Codex Log", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+                MenuItem::with_id(app, "open_codex_log", "打开 Codex 日志", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let tray_menu = Menu::with_items(
                 app,
                 &[
@@ -413,21 +453,25 @@ fn main() {
 
             let _tray = TrayIconBuilder::with_id("main")
                 .icon(tray_image_for_color("neutral")?)
-                .tooltip("Codex Status Light")
+                .tooltip("Codex 状态灯")
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "open" => show_main_window(app),
-                    "open_snapshot" => match read_live_status_snapshot() {
-                        Ok(snapshot) => {
+                    "open_snapshot" => {
+                        let snapshot = app
+                            .state::<SnapshotStore>()
+                            .read()
+                            .or_else(|| read_live_status_snapshot().ok());
+
+                        if let Some(snapshot) = snapshot {
                             if let Ok(path) = write_snapshot_file(&snapshot) {
                                 if let Err(error) = open_path(&path) {
                                     eprintln!("{error}");
                                 }
                             }
                         }
-                        Err(error) => eprintln!("{error}"),
-                    },
+                    }
                     "open_codex_log" => {
                         if let Err(error) = open_path(&codex_log_path()) {
                             eprintln!("{error}");
@@ -457,6 +501,7 @@ fn main() {
                 true,
                 &mut last_signature,
                 &mut last_icon_color,
+                &snapshot_store,
             )
             .ok();
             spawn_tray_sync(
@@ -464,6 +509,7 @@ fn main() {
                 state_item.clone(),
                 last_signature,
                 initial_snapshot,
+                snapshot_store,
             );
             if should_open_window_on_launch() {
                 show_main_window(&app_handle);

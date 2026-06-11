@@ -13,8 +13,7 @@ test("deriveStatusFromSqliteFiles holds yellow briefly after a completed turn", 
     const sql = args[2];
 
     if (sqlitePath === "state.sqlite") {
-      assert.match(sql, /cwd = '\/workspace'/);
-      return { stdout: '[{"id":"thread-1"}]' };
+      return { stdout: '[{"id":"thread-1","cwd":"/workspace"}]' };
     }
 
     if (sqlitePath === "logs.sqlite") {
@@ -66,18 +65,33 @@ test("deriveStatusFromSqliteFiles falls back to the latest global thread", async
     const sql = args[2];
 
     if (sqlitePath === "state.sqlite") {
-      if (sql.includes("cwd = '/workspace'")) {
-        return { stdout: "[]" };
-      }
-
-      return { stdout: '[{"id":"thread-2"}]' };
+      return {
+        stdout: JSON.stringify([
+          { id: "thread-1", cwd: "/other-workspace" },
+          { id: "thread-2", cwd: "/workspace" }
+        ])
+      };
     }
 
     if (sqlitePath === "logs.sqlite") {
+      if (sql.includes("thread_id = 'thread-1'")) {
+        return {
+          stdout: JSON.stringify([
+            {
+              ts: 1780627074,
+              ts_nanos: 45_303_000,
+              thread_id: "thread-1",
+              feedback_log_body:
+                'session_loop{thread_id=thread-1}:submission_dispatch{otel.name="op.dispatch.user_input"}:turn{otel.name="session_task.turn"}: codex_core::tasks: new'
+            }
+          ])
+        };
+      }
+
       return {
         stdout: JSON.stringify([
           {
-            ts: 1780627074,
+            ts: 1780627060,
             ts_nanos: 45_303_000,
             thread_id: "thread-2",
             feedback_log_body:
@@ -97,8 +111,63 @@ test("deriveStatusFromSqliteFiles falls back to the latest global thread", async
   });
 
   assert.equal(status.state, LIGHT_STATES.RUNNING);
-  assert.equal(status.threadId, "thread-2");
+  assert.equal(status.threadId, "thread-1");
   assert.equal(status.lastEventKind, "turn_started");
+});
+
+test("deriveStatusFromSqliteFiles keeps yellow when any global thread has a fresh real event", async () => {
+  const runner = async (_command, args) => {
+    const sqlitePath = args[1];
+    const sql = args[2];
+
+    if (sqlitePath === "state.sqlite") {
+      return {
+        stdout: JSON.stringify([
+          { id: "thread-green", cwd: "/workspace-a" },
+          { id: "thread-yellow", cwd: "/workspace-b" }
+        ])
+      };
+    }
+
+    if (sqlitePath === "logs.sqlite") {
+      if (sql.includes("thread_id = 'thread-green'")) {
+        return {
+          stdout: JSON.stringify([
+            {
+              ts: 1780627000,
+              ts_nanos: 0,
+              thread_id: "thread-green",
+              feedback_log_body:
+                'event.name="codex.sse_event" event.kind=response.completed event.timestamp=2026-06-05T02:36:40.000Z conversation.id=thread-green'
+            }
+          ])
+        };
+      }
+
+      return {
+        stdout: JSON.stringify([
+          {
+            ts: 1780627077,
+            ts_nanos: 0,
+            thread_id: "thread-yellow",
+            feedback_log_body:
+              'event.name="codex.sse_event" event.kind=response.output_text.delta event.timestamp=2026-06-05T02:37:57.000Z conversation.id=thread-yellow'
+          }
+        ])
+      };
+    }
+
+    throw new Error(`unexpected sqlite path: ${sqlitePath}`);
+  };
+
+  const status = await deriveStatusFromSqliteFiles("logs.sqlite", "state.sqlite", {
+    now: Date.parse("2026-06-05T02:37:58.000Z"),
+    execFileAsync: runner
+  });
+
+  assert.equal(status.state, LIGHT_STATES.RUNNING);
+  assert.equal(status.threadId, "thread-yellow");
+  assert.equal(status.lastEventKind, "replying");
 });
 
 test("deriveStatusFromSqliteFiles picks response events that only carry conversation ids", async () => {

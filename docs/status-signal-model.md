@@ -22,6 +22,15 @@ The first version should avoid treating the SQLite files as the only source of t
 | turn error | `Turn error` | red |
 | stale running state | no fresh running signal past timeout | red |
 
+## Global mode selection
+
+- `workspace` mode tracks the thread that best matches the current working directory.
+- `global` mode does not trust `threads.updated_at_ms` alone.
+- In `global` mode, threads are ranked by the timestamp of the most recent recognizable runtime event from `logs_2.sqlite`.
+- If any active thread has a fresh real event inside the global activity window, the overall light should stay yellow.
+- The light only returns to green when no tracked thread has a fresh recognizable event left.
+- Fresh approval waits stay yellow and take precedence over normal running threads.
+
 ## Cross-platform paths
 
 ### macOS
@@ -44,4 +53,3 @@ The first version should avoid treating the SQLite files as the only source of t
 - keep rule matching token-based and easy to update
 - separate signal parsing from UI rendering
 - treat timeout as a renderer-safe fallback, not as the primary status source
-

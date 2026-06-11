@@ -41,6 +41,7 @@ const DEFAULT_INTERRUPT_HOLD_MS: u64 = 4_000;
 const DEFAULT_ERROR_HOLD_MS: u64 = 10_000;
 const DEFAULT_SQLITE_EVENT_LIMIT: usize = 120;
 const DEFAULT_SQLITE_APPROVAL_LIMIT: usize = 80;
+const DEFAULT_THREAD_CANDIDATE_SCAN_LIMIT: usize = 64;
 const DEFAULT_GLOBAL_THREAD_LIMIT: usize = 8;
 const DEFAULT_GLOBAL_THREAD_WINDOW_MS: u64 = 600_000;
 const APPROVAL_PENDING_FALLBACK_MS: u64 = 60_000;
@@ -49,7 +50,7 @@ const ACTIVE_PHASE_STALE_MS: u64 = 120_000;
 const DOMINANT_RUNNING_FRESH_MS: u64 = 20_000;
 const DOMINANT_ATTENTION_FRESH_MS: u64 = 15_000;
 
-const SIGNAL_BODY_FILTERS: [&str; 10] = [
+const SIGNAL_BODY_FILTERS: [&str; 11] = [
     "%Turn error%",
     "%interrupt received%",
     "%turn-ended%",
@@ -58,6 +59,7 @@ const SIGNAL_BODY_FILTERS: [&str; 10] = [
     "%response.completed%",
     "%response.in_progress%",
     "%response.output_item.added%",
+    "%response.output_item.done%",
     "%response.output_text.delta%",
     "%response.function_call_arguments.delta%",
 ];
@@ -94,7 +96,12 @@ struct LogRow {
 struct ThreadCandidate {
     id: String,
     cwd: PathBuf,
-    updated_at_ms: u64,
+}
+
+#[derive(Debug)]
+struct ThreadStatusEvaluation {
+    snapshot: StatusSnapshot,
+    latest_real_event_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,34 +201,19 @@ fn snapshot_for(
 }
 
 fn create_initial_status(now: u64) -> StatusSnapshot {
-    snapshot_for(
-        STATE_IDLE,
-        "waiting for Codex activity",
-        EVENT_STARTUP,
-        now,
-        None,
-    )
+    snapshot_for(STATE_IDLE, "等待 Codex 活动", EVENT_STARTUP, now, None)
 }
 
 fn create_no_recent_activity_status(now: u64) -> StatusSnapshot {
-    snapshot_for(
-        STATE_IDLE,
-        "No recent Codex activity was found",
-        EVENT_STARTUP,
-        now,
-        None,
-    )
+    snapshot_for(STATE_IDLE, "最近没有发现 Codex 活动", EVENT_STARTUP, now, None)
 }
 
 fn no_local_codex_data_snapshot(now: u64) -> StatusSnapshot {
-    unavailable_snapshot("No local Codex runtime data was found on this machine", now)
+    unavailable_snapshot("这台机器上未发现本地 Codex 运行数据", now)
 }
 
 fn no_local_threads_snapshot(now: u64) -> StatusSnapshot {
-    unavailable_snapshot(
-        "Codex has not created any local threads on this machine yet",
-        now,
-    )
+    unavailable_snapshot("这台机器上的 Codex 还没有创建任何本地线程", now)
 }
 
 fn debug_scenario_snapshot_named(name: &str, now: u64) -> Option<StatusSnapshot> {
@@ -231,83 +223,83 @@ fn debug_scenario_snapshot_named(name: &str, now: u64) -> Option<StatusSnapshot>
     match scenario.as_str() {
         "green" | "idle" | "ready" => Some(snapshot_for(
             STATE_IDLE,
-            "Debug scenario: Codex is idle and ready",
+            "调试场景：Codex 空闲并已就绪",
             EVENT_TURN_COMPLETED,
             now,
             thread_id,
         )),
         "yellow" | "working" | "thinking" => Some(snapshot_for(
             STATE_RUNNING,
-            "Debug scenario: Codex is thinking",
+            "调试场景：Codex 正在读取上下文",
             EVENT_THINKING,
             now,
             thread_id,
         )),
         "tools" | "tool" => Some(snapshot_for(
             STATE_RUNNING,
-            "Debug scenario: Codex is running tools",
+            "调试场景：Codex 正在运行工具",
             EVENT_TOOL_RUNNING,
             now,
             thread_id,
         )),
         "replying" | "reply" => Some(snapshot_for(
             STATE_RUNNING,
-            "Debug scenario: Codex is writing the reply",
+            "调试场景：Codex 正在生成回复",
             EVENT_REPLYING,
             now,
             thread_id,
         )),
         "approval" | "approve" => Some(snapshot_for(
             STATE_RUNNING,
-            "Debug scenario: waiting for your approval",
+            "调试场景：等待你的授权",
             EVENT_APPROVAL_REQUIRED,
             now,
             thread_id,
         )),
         "retry" | "network" => Some(snapshot_for(
             STATE_RUNNING,
-            "Debug scenario: Codex is retrying the model request",
+            "调试场景：Codex 正在重试模型请求",
             EVENT_NETWORK_RETRY,
             now,
             thread_id,
         )),
         "red" | "error" | "attention" => Some(snapshot_for(
             STATE_ATTENTION,
-            "Debug scenario: Codex hit a turn error",
+            "调试场景：Codex 当前轮次出错",
             EVENT_TURN_ERROR,
             now,
             thread_id,
         )),
         "stalled" => Some(snapshot_for(
             STATE_ATTENTION,
-            "Debug scenario: Codex appears stalled",
+            "调试场景：Codex 似乎已卡住",
             EVENT_STALLED,
             now,
             thread_id,
         )),
         "auth" => Some(snapshot_for(
             STATE_ATTENTION,
-            "Debug scenario: Codex authentication failed",
+            "调试场景：Codex 认证失败",
             EVENT_AUTH_ERROR,
             now,
             thread_id,
         )),
         "rate-limit" | "ratelimit" | "limit" => Some(snapshot_for(
             STATE_ATTENTION,
-            "Debug scenario: Codex hit a rate limit",
+            "调试场景：Codex 遇到速率限制",
             EVENT_RATE_LIMITED,
             now,
             thread_id,
         )),
         "interrupt" => Some(snapshot_for(
             STATE_ATTENTION,
-            "Debug scenario: turn was interrupted",
+            "调试场景：当前轮次已被中断",
             EVENT_INTERRUPT,
             now,
             thread_id,
         )),
         "neutral" | "unavailable" => Some(unavailable_snapshot(
-            "Debug scenario: runtime signal unavailable",
+            "调试场景：运行时信号不可用",
             now,
         )),
         _ => None,
@@ -321,7 +313,7 @@ fn debug_scenario_snapshot(now: u64) -> Option<StatusSnapshot> {
             debug_scenario_snapshot_named(&value, now).or_else(|| {
                 Some(unavailable_snapshot(
                     format!(
-                        "Unknown debug scenario: {value}. Try green, yellow, approval, red, stalled, or neutral"
+                        "未知调试场景：{value}。可尝试 green、yellow、approval、red、stalled 或 neutral"
                     ),
                     now,
                 ))
@@ -331,33 +323,33 @@ fn debug_scenario_snapshot(now: u64) -> Option<StatusSnapshot> {
 
 fn running_reason(kind: &str) -> &'static str {
     match kind {
-        EVENT_TURN_STARTED => "Codex started a new turn",
-        EVENT_THINKING => "Codex is thinking",
-        EVENT_TOOL_RUNNING => "Codex is running tools",
-        EVENT_REPLYING => "Codex is writing the reply",
-        EVENT_NETWORK_RETRY => "Codex is retrying the model request",
-        EVENT_APPROVAL_REQUIRED => "waiting for your approval",
-        _ => "Codex is actively working",
+        EVENT_TURN_STARTED => "Codex 已开始新一轮",
+        EVENT_THINKING => "Codex 正在读取上下文",
+        EVENT_TOOL_RUNNING => "Codex 正在运行工具",
+        EVENT_REPLYING => "Codex 正在生成回复",
+        EVENT_NETWORK_RETRY => "Codex 正在重试模型请求",
+        EVENT_APPROVAL_REQUIRED => "等待你的授权",
+        _ => "Codex 正在工作",
     }
 }
 
 fn attention_reason(kind: &str) -> &'static str {
     match kind {
-        EVENT_INTERRUPT => "turn was interrupted",
-        EVENT_AUTH_ERROR => "Codex authentication failed",
-        EVENT_RATE_LIMITED => "Codex hit a rate limit",
-        _ => "Codex hit a turn error",
+        EVENT_INTERRUPT => "当前轮次已被中断",
+        EVENT_AUTH_ERROR => "Codex 认证失败",
+        EVENT_RATE_LIMITED => "Codex 遇到速率限制",
+        _ => "Codex 当前轮次出错",
     }
 }
 
 fn stalled_reason(last_event_kind: &str) -> &'static str {
     match last_event_kind {
-        EVENT_NETWORK_RETRY => "Codex has been retrying for too long",
-        EVENT_THINKING => "thinking has been quiet for too long",
-        EVENT_TOOL_RUNNING => "tool execution has been quiet for too long",
-        EVENT_REPLYING => "reply generation has been quiet for too long",
-        EVENT_TURN_STARTED | EVENT_RUNNING => "Codex started work but no fresh output arrived",
-        _ => "Codex appears stalled",
+        EVENT_NETWORK_RETRY => "Codex 重试时间过长",
+        EVENT_THINKING => "读取状态过久没有新进展",
+        EVENT_TOOL_RUNNING => "工具执行过久没有新进展",
+        EVENT_REPLYING => "回复生成过久没有新进展",
+        EVENT_TURN_STARTED | EVENT_RUNNING => "Codex 已开始工作，但长时间没有新输出",
+        _ => "Codex 似乎已卡住",
     }
 }
 
@@ -373,10 +365,10 @@ fn running_stale_ms(last_event_kind: &str) -> u64 {
 
 fn idle_reason_after_attention(kind: &str) -> &'static str {
     match kind {
-        EVENT_INTERRUPT => "waiting for the next turn",
-        EVENT_AUTH_ERROR => "last authentication issue is no longer active",
-        EVENT_RATE_LIMITED => "last rate limit is no longer active",
-        _ => "last turn error is no longer active",
+        EVENT_INTERRUPT => "等待下一轮开始",
+        EVENT_AUTH_ERROR => "上一次认证问题已恢复",
+        EVENT_RATE_LIMITED => "上一次速率限制已恢复",
+        _ => "上一次轮次错误已恢复",
     }
 }
 
@@ -404,7 +396,7 @@ fn reduce_event(current_status: &StatusSnapshot, event: StatusEvent) -> StatusSn
     match event.kind {
         EVENT_TURN_COMPLETED => snapshot_for(
             STATE_RUNNING,
-            "Codex just finished; holding yellow briefly",
+            "Codex 刚完成任务，黄灯会短暂停留",
             EVENT_COOLDOWN,
             event.at,
             thread_id,
@@ -443,7 +435,7 @@ fn derive_status(current_status: &StatusSnapshot, now: u64) -> StatusSnapshot {
 
         return snapshot_for(
             STATE_IDLE,
-            "turn completed",
+            "本轮已完成",
             EVENT_TURN_COMPLETED,
             current_status.last_event_at,
             current_status.thread_id.clone(),
@@ -514,6 +506,12 @@ fn extract_call_id(text: &str) -> Option<String> {
     extract_marker_value(text, "call_id=\"")
         .or_else(|| extract_marker_value(text, "call_id="))
         .or_else(|| extract_marker_value(text, "\"call_id\":\""))
+}
+
+fn extract_tool_name(text: &str) -> Option<String> {
+    extract_marker_value(text, "tool_name=\"")
+        .or_else(|| extract_marker_value(text, "tool_name="))
+        .or_else(|| extract_marker_value(text, "ToolCall: "))
 }
 
 fn classify_log_text(text: &str) -> Option<&'static str> {
@@ -593,10 +591,7 @@ fn derive_status_from_log_file(path: &Path, now: u64) -> Result<StatusSnapshot, 
     let log_text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(unavailable_snapshot(
-                "No local Codex log file was found on this machine",
-                now,
-            ));
+            return Ok(unavailable_snapshot("这台机器上未找到本地 Codex 日志文件", now));
         }
         Err(error) => {
             return Err(format!("failed to read {}: {error}", path.display()));
@@ -605,7 +600,7 @@ fn derive_status_from_log_file(path: &Path, now: u64) -> Result<StatusSnapshot, 
 
     if log_text.trim().is_empty() {
         return Ok(unavailable_snapshot(
-            "Codex log exists, but it does not contain runtime events yet",
+            "Codex 日志已存在，但还没有运行时事件",
             now,
         ));
     }
@@ -622,7 +617,7 @@ fn derive_status_from_log_file(path: &Path, now: u64) -> Result<StatusSnapshot, 
 
     if !saw_event {
         return Ok(unavailable_snapshot(
-            "Codex log does not contain a recognizable runtime event yet",
+            "Codex 日志里还没有可识别的运行时事件",
             now,
         ));
     }
@@ -674,7 +669,6 @@ fn select_recent_thread_candidates(
             Ok(ThreadCandidate {
                 id: row.get(0)?,
                 cwd: PathBuf::from(row.get::<_, String>(1)?),
-                updated_at_ms: row.get::<_, i64>(2)?.max(0) as u64,
             })
         })
         .map_err(|error| format!("failed to query recent thread candidates: {error}"))?;
@@ -708,7 +702,7 @@ fn select_active_thread_id(
     connection: &Connection,
     cwd: Option<&Path>,
 ) -> Result<Option<String>, String> {
-    let candidates = select_recent_thread_candidates(connection, 200)?;
+    let candidates = select_recent_thread_candidates(connection, DEFAULT_THREAD_CANDIDATE_SCAN_LIMIT)?;
 
     if candidates.is_empty() {
         return Ok(None);
@@ -751,26 +745,6 @@ fn has_any_unarchived_threads(connection: &Connection) -> Result<bool, String> {
         )
         .map(|value| value != 0)
         .map_err(|error| format!("failed to detect whether Codex has local threads: {error}"))
-}
-
-fn select_tracked_thread_ids(
-    connection: &Connection,
-    cwd: Option<&Path>,
-    now: u64,
-) -> Result<Vec<String>, String> {
-    match thread_scope_from_env() {
-        ThreadScope::Workspace => Ok(select_active_thread_id(connection, cwd)?.into_iter().collect()),
-        ThreadScope::Global => {
-            let cutoff = now.saturating_sub(global_thread_window_ms_from_env());
-            let thread_ids = select_recent_thread_candidates(connection, DEFAULT_GLOBAL_THREAD_LIMIT)?
-                .into_iter()
-                .filter(|candidate| candidate.updated_at_ms >= cutoff)
-                .map(|candidate| candidate.id)
-                .collect::<Vec<_>>();
-
-            Ok(thread_ids)
-        }
-    }
 }
 
 fn sql_pattern(pattern: &str) -> String {
@@ -878,11 +852,17 @@ fn is_approval_resolution(text: &str) -> bool {
 
 fn pending_approval_from_rows(rows: &[LogRow], now: u64) -> Option<StatusEvent> {
     let mut resolved_call_ids = HashSet::new();
+    let mut resolved_tool_names = HashSet::new();
+    let mut saw_resolution_after = false;
 
     for row in rows {
         if is_approval_resolution(&row.feedback_log_body) {
+            saw_resolution_after = true;
             if let Some(call_id) = extract_call_id(&row.feedback_log_body) {
                 resolved_call_ids.insert(call_id);
+            }
+            if let Some(tool_name) = extract_tool_name(&row.feedback_log_body) {
+                resolved_tool_names.insert(tool_name);
             }
             continue;
         }
@@ -907,6 +887,14 @@ fn pending_approval_from_rows(rows: &[LogRow], now: u64) -> Option<StatusEvent> 
             continue;
         }
 
+        if let Some(tool_name) = extract_tool_name(&row.feedback_log_body) {
+            if resolved_tool_names.contains(&tool_name) {
+                continue;
+            }
+        } else if saw_resolution_after {
+            continue;
+        }
+
         if now.saturating_sub(event.at) <= APPROVAL_PENDING_FALLBACK_MS {
             return Some(event);
         }
@@ -924,30 +912,92 @@ fn derive_status_for_thread(
     thread_id: &str,
     now: u64,
 ) -> Result<StatusSnapshot, String> {
-    if let Some(approval_event) =
-        pending_approval_from_rows(&select_approval_rows(connection, thread_id)?, now)
-    {
-        return Ok(reduce_event(&create_initial_status(now), approval_event));
+    Ok(evaluate_thread_status(connection, thread_id, now)?.snapshot)
+}
+
+fn evaluate_thread_status(
+    connection: &Connection,
+    thread_id: &str,
+    now: u64,
+) -> Result<ThreadStatusEvaluation, String> {
+    let approval_rows = select_approval_rows(connection, thread_id)?;
+    if let Some(approval_event) = pending_approval_from_rows(&approval_rows, now) {
+        let approval_event_at = approval_event.at;
+        return Ok(ThreadStatusEvaluation {
+            snapshot: reduce_event(&create_initial_status(now), approval_event),
+            latest_real_event_at: Some(
+                approval_rows
+                    .iter()
+                    .map(event_time_ms)
+                    .max()
+                    .unwrap_or(approval_event_at),
+            ),
+        });
     }
 
     let rows = select_thread_rows(connection, thread_id)?;
     let mut status = create_initial_status(now);
+    let mut latest_real_event_at = None;
 
     for row in rows {
         let Some(kind) = classify_log_text(&row.feedback_log_body) else {
             continue;
         };
+        let event_at = event_time_ms(&row);
+        latest_real_event_at = Some(event_at);
         status = reduce_event(
             &status,
             StatusEvent {
                 kind,
-                at: event_time_ms(&row),
+                at: event_at,
                 thread_id: row.thread_id.or_else(|| extract_thread_id(&row.feedback_log_body)),
             },
         );
     }
 
-    Ok(derive_status(&status, now))
+    Ok(ThreadStatusEvaluation {
+        snapshot: derive_status(&status, now),
+        latest_real_event_at,
+    })
+}
+
+fn select_global_snapshots(
+    state_connection: &Connection,
+    logs_connection: &Connection,
+    now: u64,
+) -> Result<Vec<StatusSnapshot>, String> {
+    let cutoff = now.saturating_sub(global_thread_window_ms_from_env());
+    let mut evaluations = Vec::new();
+
+    for candidate in
+        select_recent_thread_candidates(state_connection, DEFAULT_THREAD_CANDIDATE_SCAN_LIMIT)?
+    {
+        let evaluation = evaluate_thread_status(logs_connection, &candidate.id, now)?;
+        let is_pending_approval = evaluation.snapshot.last_event_kind == EVENT_APPROVAL_REQUIRED;
+        let has_recent_real_event = evaluation
+            .latest_real_event_at
+            .map(|event_at| event_at >= cutoff)
+            .unwrap_or(false);
+
+        if has_recent_real_event || is_pending_approval {
+            evaluations.push(evaluation);
+        }
+    }
+
+    evaluations.sort_by(|left, right| {
+        right
+            .latest_real_event_at
+            .cmp(&left.latest_real_event_at)
+            .then_with(|| {
+                snapshot_priority(&right.snapshot, now).cmp(&snapshot_priority(&left.snapshot, now))
+            })
+    });
+    evaluations.truncate(DEFAULT_GLOBAL_THREAD_LIMIT);
+
+    Ok(evaluations
+        .into_iter()
+        .map(|evaluation| evaluation.snapshot)
+        .collect())
 }
 
 fn freshness_priority(age_ms: u64) -> u8 {
@@ -991,7 +1041,7 @@ fn pick_dominant_snapshot(
         }
     }
 
-    dominant.unwrap_or_else(|| StatusSnapshot::unavailable("Status temporarily unavailable"))
+    dominant.unwrap_or_else(|| StatusSnapshot::unavailable("状态暂时不可用"))
 }
 
 fn derive_status_from_sqlite(
@@ -1005,31 +1055,33 @@ fn derive_status_from_sqlite(
     }
 
     let state_connection = open_sqlite_readonly(state_path)?;
-    let thread_ids = select_tracked_thread_ids(&state_connection, cwd, now)?;
-    if thread_ids.is_empty() {
-        return Ok(if has_any_unarchived_threads(&state_connection)? {
-            create_no_recent_activity_status(now)
-        } else {
-            no_local_threads_snapshot(now)
-        });
+    let has_any_threads = has_any_unarchived_threads(&state_connection)?;
+    if !has_any_threads {
+        return Ok(no_local_threads_snapshot(now));
     }
 
     let logs_connection = open_sqlite_readonly(logs_path)?;
-    let mut snapshots = Vec::new();
-    let mut errors = Vec::new();
 
-    for thread_id in thread_ids {
-        match derive_status_for_thread(&logs_connection, &thread_id, now) {
-            Ok(snapshot) => snapshots.push(snapshot),
-            Err(error) => errors.push(format!("{thread_id}: {error}")),
+    let snapshots = match thread_scope_from_env() {
+        ThreadScope::Workspace => {
+            let Some(thread_id) = select_active_thread_id(&state_connection, cwd)? else {
+                return Ok(create_no_recent_activity_status(now));
+            };
+
+            match derive_status_for_thread(&logs_connection, &thread_id, now) {
+                Ok(snapshot) => vec![snapshot],
+                Err(error) => {
+                    return Ok(StatusSnapshot::unavailable(format!(
+                        "状态暂时不可用：{thread_id}: {error}"
+                    )));
+                }
+            }
         }
-    }
+        ThreadScope::Global => select_global_snapshots(&state_connection, &logs_connection, now)?,
+    };
 
-    if snapshots.is_empty() && !errors.is_empty() {
-        return Ok(StatusSnapshot::unavailable(format!(
-            "Status temporarily unavailable: {}",
-            errors[0]
-        )));
+    if snapshots.is_empty() {
+        return Ok(create_no_recent_activity_status(now));
     }
 
     Ok(pick_dominant_snapshot(snapshots, now))
@@ -1105,6 +1157,56 @@ mod tests {
         dir
     }
 
+    fn create_threads_table(connection: &Connection) {
+        connection
+            .execute(
+                "create table threads (
+                    id text not null,
+                    cwd text not null,
+                    updated_at_ms integer,
+                    updated_at integer,
+                    archived integer not null default 0
+                )",
+                [],
+            )
+            .expect("threads table should be created");
+    }
+
+    fn create_logs_table(connection: &Connection) {
+        connection
+            .execute(
+                "create table logs (
+                    id integer primary key autoincrement,
+                    ts integer not null,
+                    ts_nanos integer not null default 0,
+                    thread_id text,
+                    feedback_log_body text
+                )",
+                [],
+            )
+            .expect("logs table should be created");
+    }
+
+    fn insert_thread(connection: &Connection, id: &str, cwd: &str, updated_at_ms: i64) {
+        connection
+            .execute(
+                "insert into threads (id, cwd, updated_at_ms, updated_at, archived)
+                 values (?1, ?2, ?3, ?4, 0)",
+                params![id, cwd, updated_at_ms, updated_at_ms / 1000],
+            )
+            .expect("thread row should be inserted");
+    }
+
+    fn insert_log(connection: &Connection, ts: i64, thread_id: &str, body: &str) {
+        connection
+            .execute(
+                "insert into logs (ts, ts_nanos, thread_id, feedback_log_body)
+                 values (?1, 0, ?2, ?3)",
+                params![ts, thread_id, body],
+            )
+            .expect("log row should be inserted");
+    }
+
     #[test]
     fn classify_turn_started_event() {
         let line = "2026-06-05T01:00:00Z INFO session_loop{thread_id=abc-123}:submission_dispatch{otel.name=\"op.dispatch.user_input\"}:turn{otel.name=\"session_task.turn\"}: codex_core::tasks: new";
@@ -1123,7 +1225,7 @@ mod tests {
 
         assert_eq!(next.state, STATE_RUNNING);
         assert_eq!(next.color, COLOR_YELLOW);
-        assert_eq!(next.reason, "Codex started a new turn");
+        assert_eq!(next.reason, "Codex 已开始新一轮");
     }
 
     #[test]
@@ -1136,7 +1238,7 @@ mod tests {
 
         assert_eq!(settled.state, STATE_IDLE);
         assert_eq!(settled.last_event_kind, EVENT_TURN_COMPLETED);
-        assert_eq!(settled.reason, "turn completed");
+        assert_eq!(settled.reason, "本轮已完成");
     }
 
     #[test]
@@ -1149,7 +1251,7 @@ mod tests {
 
         assert_eq!(cleared.state, STATE_IDLE);
         assert_eq!(cleared.last_event_kind, EVENT_ATTENTION_CLEARED);
-        assert_eq!(cleared.reason, "waiting for the next turn");
+        assert_eq!(cleared.reason, "等待下一轮开始");
     }
 
     #[test]
@@ -1179,7 +1281,7 @@ mod tests {
 
         assert_eq!(stale.state, STATE_ATTENTION);
         assert_eq!(stale.last_event_kind, EVENT_STALLED);
-        assert_eq!(stale.reason, "Codex has been retrying for too long");
+        assert_eq!(stale.reason, "Codex 重试时间过长");
     }
 
     #[test]
@@ -1200,7 +1302,7 @@ mod tests {
         assert_eq!(later.state, STATE_RUNNING);
         assert_eq!(later.color, COLOR_YELLOW);
         assert_eq!(later.last_event_kind, EVENT_APPROVAL_REQUIRED);
-        assert_eq!(later.reason, "waiting for your approval");
+        assert_eq!(later.reason, "等待你的授权");
     }
 
     #[test]
@@ -1238,6 +1340,62 @@ mod tests {
     }
 
     #[test]
+    fn approval_without_call_id_is_cleared_by_newer_matching_tool_resolution() {
+        let rows = vec![
+            LogRow {
+                ts: 1_001,
+                ts_nanos: 0,
+                thread_id: Some("abc-123".into()),
+                feedback_log_body: "dispatch_tool_call_with_terminal_outcome: event.name=\"codex.tool_decision\" tool_name=exec_command call_id=call_456 decision=approved conversation.id=abc-123".into(),
+            },
+            LogRow {
+                ts: 1_000,
+                ts_nanos: 0,
+                thread_id: Some("abc-123".into()),
+                feedback_log_body: "session_loop{thread_id=abc-123}:handle_output_item_done: ToolCall: exec_command {\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Do you want to allow ...\"}".into(),
+            },
+        ];
+
+        assert!(pending_approval_from_rows(&rows, 1_001_000).is_none());
+    }
+
+    #[test]
+    fn approval_without_call_id_stays_pending_without_newer_matching_resolution() {
+        let rows = vec![
+            LogRow {
+                ts: 1_001,
+                ts_nanos: 0,
+                thread_id: Some("abc-123".into()),
+                feedback_log_body: "dispatch_tool_call_with_terminal_outcome: event.name=\"codex.tool_result\" tool_name=read_mcp_resource call_id=call_other conversation.id=abc-123".into(),
+            },
+            LogRow {
+                ts: 1_000,
+                ts_nanos: 0,
+                thread_id: Some("abc-123".into()),
+                feedback_log_body: "session_loop{thread_id=abc-123}:handle_output_item_done: ToolCall: exec_command {\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Do you want to allow ...\"}".into(),
+            },
+        ];
+
+        let pending = pending_approval_from_rows(&rows, 1_000_500).expect("approval should be pending");
+        assert_eq!(pending.kind, EVENT_APPROVAL_REQUIRED);
+        assert_eq!(pending.thread_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn approval_without_call_id_uses_fallback_when_no_resolution_exists() {
+        let rows = vec![LogRow {
+            ts: 1_000,
+            ts_nanos: 0,
+            thread_id: Some("abc-123".into()),
+            feedback_log_body: "session_loop{thread_id=abc-123}:handle_output_item_done: ToolCall: exec_command {\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Do you want to allow ...\"}".into(),
+        }];
+
+        let pending = pending_approval_from_rows(&rows, 1_000_500).expect("approval should be pending");
+        assert_eq!(pending.kind, EVENT_APPROVAL_REQUIRED);
+        assert_eq!(pending.thread_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
     fn select_thread_prefers_parent_workspace_match() {
         let target = Path::new("/Users/chentulin/Documents/指示灯/apps/status-light-shell");
         let candidate = Path::new("/Users/chentulin/Documents/指示灯");
@@ -1249,14 +1407,14 @@ mod tests {
     fn dominant_snapshot_prefers_attention_over_running() {
         let running = snapshot_for(
             STATE_RUNNING,
-            "Codex is thinking",
+            "Codex 正在读取上下文",
             EVENT_THINKING,
             2_000,
             Some("thread-running".into()),
         );
         let attention = snapshot_for(
             STATE_ATTENTION,
-            "Codex hit a turn error",
+            "Codex 当前轮次出错",
             EVENT_TURN_ERROR,
             1_500,
             Some("thread-attention".into()),
@@ -1271,14 +1429,14 @@ mod tests {
     fn dominant_snapshot_prefers_approval_over_normal_running() {
         let running = snapshot_for(
             STATE_RUNNING,
-            "Codex is writing the reply",
+            "Codex 正在生成回复",
             EVENT_REPLYING,
             3_000,
             Some("thread-reply".into()),
         );
         let approval = snapshot_for(
             STATE_RUNNING,
-            "waiting for your approval",
+            "等待你的授权",
             EVENT_APPROVAL_REQUIRED,
             2_000,
             Some("thread-approval".into()),
@@ -1293,14 +1451,14 @@ mod tests {
     fn dominant_snapshot_prefers_fresh_running_over_old_stalled_attention() {
         let old_stalled = snapshot_for(
             STATE_ATTENTION,
-            "Codex appears stalled",
+            "Codex 似乎已卡住",
             EVENT_STALLED,
             10_000,
             Some("thread-stalled".into()),
         );
         let fresh_running = snapshot_for(
             STATE_RUNNING,
-            "Codex is thinking",
+            "Codex 正在读取上下文",
             EVENT_THINKING,
             55_000,
             Some("thread-running".into()),
@@ -1315,14 +1473,14 @@ mod tests {
     fn dominant_snapshot_keeps_fresh_error_over_running() {
         let fresh_error = snapshot_for(
             STATE_ATTENTION,
-            "Codex hit a turn error",
+            "Codex 当前轮次出错",
             EVENT_TURN_ERROR,
             58_000,
             Some("thread-error".into()),
         );
         let fresh_running = snapshot_for(
             STATE_RUNNING,
-            "Codex is thinking",
+            "Codex 正在读取上下文",
             EVENT_THINKING,
             59_000,
             Some("thread-running".into()),
@@ -1338,21 +1496,12 @@ mod tests {
         let dir = temp_test_dir("no-threads");
         let logs_path = dir.join("logs_2.sqlite");
         let state_path = dir.join("state_5.sqlite");
-        fs::write(&logs_path, "").expect("log sqlite placeholder should be written");
+        let logs_connection = Connection::open(&logs_path).expect("logs db should open");
+        create_logs_table(&logs_connection);
+        drop(logs_connection);
 
         let connection = Connection::open(&state_path).expect("state db should open");
-        connection
-            .execute(
-                "create table threads (
-                    id text not null,
-                    cwd text not null,
-                    updated_at_ms integer,
-                    updated_at integer,
-                    archived integer not null default 0
-                )",
-                [],
-            )
-            .expect("threads table should be created");
+        create_threads_table(&connection);
         drop(connection);
 
         let snapshot =
@@ -1362,7 +1511,7 @@ mod tests {
         assert_eq!(snapshot.last_event_kind, EVENT_UNAVAILABLE);
         assert_eq!(
             snapshot.reason,
-            "Codex has not created any local threads on this machine yet"
+            "这台机器上的 Codex 还没有创建任何本地线程"
         );
 
         let _ = fs::remove_dir_all(dir);
@@ -1373,28 +1522,13 @@ mod tests {
         let dir = temp_test_dir("no-recent-threads");
         let logs_path = dir.join("logs_2.sqlite");
         let state_path = dir.join("state_5.sqlite");
-        fs::write(&logs_path, "").expect("log sqlite placeholder should be written");
+        let logs_connection = Connection::open(&logs_path).expect("logs db should open");
+        create_logs_table(&logs_connection);
+        drop(logs_connection);
 
         let connection = Connection::open(&state_path).expect("state db should open");
-        connection
-            .execute(
-                "create table threads (
-                    id text not null,
-                    cwd text not null,
-                    updated_at_ms integer,
-                    updated_at integer,
-                    archived integer not null default 0
-                )",
-                [],
-            )
-            .expect("threads table should be created");
-        connection
-            .execute(
-                "insert into threads (id, cwd, updated_at_ms, updated_at, archived)
-                 values (?1, ?2, ?3, ?4, 0)",
-                params!["thread-1", "/tmp/codex", 1_i64, 0_i64],
-            )
-            .expect("thread row should be inserted");
+        create_threads_table(&connection);
+        insert_thread(&connection, "thread-1", "/tmp/codex", 1);
         drop(connection);
 
         let now = global_thread_window_ms_from_env() + 60_000;
@@ -1403,7 +1537,77 @@ mod tests {
 
         assert_eq!(snapshot.state, STATE_IDLE);
         assert_eq!(snapshot.color, COLOR_GREEN);
-        assert_eq!(snapshot.reason, "No recent Codex activity was found");
+        assert_eq!(snapshot.reason, "最近没有发现 Codex 活动");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn derive_status_from_sqlite_global_prefers_latest_real_event_over_thread_updated_at() {
+        let dir = temp_test_dir("global-prefers-real-events");
+        let logs_path = dir.join("logs_2.sqlite");
+        let state_path = dir.join("state_5.sqlite");
+
+        let logs_connection = Connection::open(&logs_path).expect("logs db should open");
+        create_logs_table(&logs_connection);
+        insert_log(
+            &logs_connection,
+            1_700,
+            "thread-fresh",
+            "2026-06-05T01:28:20Z TRACE codex_api::sse::responses|SSE event: {\"type\":\"response.output_text.delta\"} conversation.id=thread-fresh",
+        );
+        insert_log(
+            &logs_connection,
+            1_600,
+            "thread-stale",
+            "2026-06-05T01:26:40Z INFO session_loop{thread_id=thread-stale}:submission_dispatch{otel.name=\"op.dispatch.user_input\"}:turn{otel.name=\"session_task.turn\"}: codex_core::tasks: new",
+        );
+        drop(logs_connection);
+
+        let state_connection = Connection::open(&state_path).expect("state db should open");
+        create_threads_table(&state_connection);
+        insert_thread(&state_connection, "thread-stale", "/tmp/stale", 2_000_000);
+        insert_thread(&state_connection, "thread-fresh", "/tmp/fresh", 1_000);
+        drop(state_connection);
+
+        let snapshot =
+            derive_status_from_sqlite(&logs_path, &state_path, None, 1_705_000).expect("status");
+
+        assert_eq!(snapshot.state, STATE_RUNNING);
+        assert_eq!(snapshot.color, COLOR_YELLOW);
+        assert_eq!(snapshot.thread_id.as_deref(), Some("thread-fresh"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn derive_status_from_sqlite_global_returns_green_when_threads_have_no_fresh_events() {
+        let dir = temp_test_dir("global-no-fresh-events");
+        let logs_path = dir.join("logs_2.sqlite");
+        let state_path = dir.join("state_5.sqlite");
+
+        let logs_connection = Connection::open(&logs_path).expect("logs db should open");
+        create_logs_table(&logs_connection);
+        insert_log(
+            &logs_connection,
+            1,
+            "thread-old",
+            "2026-06-05T01:00:01Z INFO session_loop{thread_id=thread-old}:submission_dispatch{otel.name=\"op.dispatch.user_input\"}:turn{otel.name=\"session_task.turn\"}: codex_core::tasks: new",
+        );
+        drop(logs_connection);
+
+        let state_connection = Connection::open(&state_path).expect("state db should open");
+        create_threads_table(&state_connection);
+        insert_thread(&state_connection, "thread-old", "/tmp/old", 9_999_999);
+        drop(state_connection);
+
+        let now = global_thread_window_ms_from_env() + 120_000;
+        let snapshot =
+            derive_status_from_sqlite(&logs_path, &state_path, None, now).expect("status");
+
+        assert_eq!(snapshot.state, STATE_IDLE);
+        assert_eq!(snapshot.color, COLOR_GREEN);
+        assert_eq!(snapshot.reason, "最近没有发现 Codex 活动");
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -1421,7 +1625,7 @@ mod tests {
         assert_eq!(snapshot.last_event_kind, EVENT_UNAVAILABLE);
         assert_eq!(
             snapshot.reason,
-            "Codex log does not contain a recognizable runtime event yet"
+            "Codex 日志里还没有可识别的运行时事件"
         );
 
         let _ = fs::remove_dir_all(dir);
