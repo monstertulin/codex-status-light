@@ -37,15 +37,19 @@ The first version should avoid treating the SQLite files as the only source of t
 
 - Codex home: `~/.codex`
 - log file: `~/.codex/log/codex-tui.log`
-- state DB: `~/.codex/state_5.sqlite`
-- logs DB: `~/.codex/logs_2.sqlite`
+- preferred state DB: `~/.codex/sqlite/state_5.sqlite`
+- preferred logs DB: `~/.codex/sqlite/logs_2.sqlite`
+- legacy state DB fallback: `~/.codex/state_5.sqlite`
+- legacy logs DB fallback: `~/.codex/logs_2.sqlite`
 
 ### Windows
 
 - Codex home: `%USERPROFILE%\\.codex`
 - log file: `%USERPROFILE%\\.codex\\log\\codex-tui.log`
-- state DB: `%USERPROFILE%\\.codex\\state_5.sqlite`
-- logs DB: `%USERPROFILE%\\.codex\\logs_2.sqlite`
+- preferred state DB: `%USERPROFILE%\\.codex\\sqlite\\state_5.sqlite`
+- preferred logs DB: `%USERPROFILE%\\.codex\\sqlite\\logs_2.sqlite`
+- legacy state DB fallback: `%USERPROFILE%\\.codex\\state_5.sqlite`
+- legacy logs DB fallback: `%USERPROFILE%\\.codex\\logs_2.sqlite`
 
 ## Guard rails
 

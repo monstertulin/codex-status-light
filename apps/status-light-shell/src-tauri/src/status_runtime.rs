@@ -137,12 +137,21 @@ pub fn codex_log_path() -> PathBuf {
     codex_home_path().join("log").join("codex-tui.log")
 }
 
+fn preferred_sqlite_path(codex_home: &Path, file_name: &str) -> PathBuf {
+    let sqlite_dir_path = codex_home.join("sqlite").join(file_name);
+    if sqlite_dir_path.exists() {
+        sqlite_dir_path
+    } else {
+        codex_home.join(file_name)
+    }
+}
+
 fn codex_logs_sqlite_path() -> PathBuf {
-    codex_home_path().join("logs_2.sqlite")
+    preferred_sqlite_path(&codex_home_path(), "logs_2.sqlite")
 }
 
 fn codex_state_sqlite_path() -> PathBuf {
-    codex_home_path().join("state_5.sqlite")
+    preferred_sqlite_path(&codex_home_path(), "state_5.sqlite")
 }
 
 pub fn snapshot_path() -> PathBuf {
@@ -1155,6 +1164,33 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("temp test dir should be created");
         dir
+    }
+
+    #[test]
+    fn preferred_sqlite_path_uses_sqlite_subdirectory_when_present() {
+        let dir = temp_test_dir("preferred-sqlite-dir");
+        let sqlite_dir = dir.join("sqlite");
+        fs::create_dir_all(&sqlite_dir).expect("sqlite dir should be created");
+        fs::write(sqlite_dir.join("logs_2.sqlite"), "").expect("sqlite file should exist");
+
+        assert_eq!(
+            preferred_sqlite_path(&dir, "logs_2.sqlite"),
+            sqlite_dir.join("logs_2.sqlite")
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn preferred_sqlite_path_falls_back_to_legacy_root_path() {
+        let dir = temp_test_dir("preferred-sqlite-root-fallback");
+
+        assert_eq!(
+            preferred_sqlite_path(&dir, "state_5.sqlite"),
+            dir.join("state_5.sqlite")
+        );
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     fn create_threads_table(connection: &Connection) {

@@ -35,21 +35,38 @@ test("resolveCodexHome uses the user home on Windows", () => {
 
 test("resolveSignalFiles points to the expected local files", () => {
   const files = resolveSignalFiles({
-    codexHome: "/Users/demo/.codex"
+    codexHome: "/Users/demo/.codex",
+    existsSync: () => false
   });
 
   assert.equal(files.logFile, "/Users/demo/.codex/log/codex-tui.log");
   assert.equal(files.logsSqlite, "/Users/demo/.codex/logs_2.sqlite");
+  assert.equal(files.stateSqlite, "/Users/demo/.codex/state_5.sqlite");
+});
+
+test("resolveSignalFiles prefers sqlite subdirectory when present", () => {
+  const files = resolveSignalFiles({
+    codexHome: "/Users/demo/.codex",
+    existsSync: (targetPath) =>
+      targetPath === "/Users/demo/.codex/sqlite/logs_2.sqlite" ||
+      targetPath === "/Users/demo/.codex/sqlite/state_5.sqlite"
+  });
+
+  assert.equal(files.logsSqlite, "/Users/demo/.codex/sqlite/logs_2.sqlite");
+  assert.equal(files.stateSqlite, "/Users/demo/.codex/sqlite/state_5.sqlite");
 });
 
 test("resolveSignalFiles uses Windows separators when asked", () => {
   const files = resolveSignalFiles({
     platform: "win32",
-    codexHome: "C:\\Users\\demo\\.codex"
+    codexHome: "C:\\Users\\demo\\.codex",
+    existsSync: (targetPath) =>
+      targetPath === "C:\\Users\\demo\\.codex\\sqlite\\state_5.sqlite"
   });
 
   assert.equal(files.logFile, "C:\\Users\\demo\\.codex\\log\\codex-tui.log");
-  assert.equal(files.stateSqlite, "C:\\Users\\demo\\.codex\\state_5.sqlite");
+  assert.equal(files.logsSqlite, "C:\\Users\\demo\\.codex\\logs_2.sqlite");
+  assert.equal(files.stateSqlite, "C:\\Users\\demo\\.codex\\sqlite\\state_5.sqlite");
 });
 
 test("classifyLogLine detects a running event", () => {
