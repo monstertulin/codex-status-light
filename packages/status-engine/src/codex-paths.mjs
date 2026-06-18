@@ -20,11 +20,32 @@ export function resolveSignalFiles(options = {}) {
   const pathApi = selectPathApi(platform);
   const codexHome = options.codexHome ?? resolveCodexHome(options);
   const existsSync = options.existsSync ?? fs.existsSync;
+  const statSync = options.statSync ?? fs.statSync;
   const preferredSqlitePath = (fileName) => {
+    const rootPath = pathApi.join(codexHome, fileName);
     const sqliteDirPath = pathApi.join(codexHome, "sqlite", fileName);
-    return existsSync(sqliteDirPath)
-      ? sqliteDirPath
-      : pathApi.join(codexHome, fileName);
+
+    const candidates = [rootPath, sqliteDirPath].filter((targetPath) =>
+      existsSync(targetPath)
+    );
+
+    if (candidates.length === 0) {
+      return rootPath;
+    }
+
+    if (candidates.length === 1) {
+      return candidates[0];
+    }
+
+    const mtimeMsFor = (targetPath) => {
+      try {
+        return statSync(targetPath).mtimeMs ?? 0;
+      } catch {
+        return 0;
+      }
+    };
+
+    return candidates.sort((left, right) => mtimeMsFor(right) - mtimeMsFor(left))[0];
   };
 
   return {

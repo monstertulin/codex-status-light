@@ -328,7 +328,7 @@ function macosVariant() {
       const isActive = lamp.key === activeLampKey;
       const isNeutral = activeState === "neutral";
       const isDimmed = isActive && isDimmedActiveState(activeState);
-      const glowStrength = isActive ? (isDimmed ? 0.34 : 0.68) : isNeutral ? 0.07 : 0.03;
+      const glowStrength = isActive ? (isDimmed ? 0.1 : 0.68) : isNeutral ? 0.07 : 0.03;
       const seatGlow = glowAlpha(
         x,
         y,
@@ -447,7 +447,7 @@ function macosVariant() {
         lamp.y - scaled(0.7),
         scaled(5.8),
         scaled(2.8),
-        isActive ? (isDimmed ? 0.14 : 0.24) : isNeutral ? 0.022 : 0.035
+        isActive ? (isDimmed ? 0.04 : 0.24) : isNeutral ? 0.022 : 0.035
       );
       const lowerReflect = circleSoftAlpha(
         x,
@@ -460,11 +460,13 @@ function macosVariant() {
 
       const bodyColor = isNeutral
         ? blendColor(lamp.color, [76, 86, 96], 0.62)
-        : isActive
-          ? blendColor(lamp.color, [255, 255, 255], isDimmed ? 0.06 : 0.12)
-          : blendColor(lamp.color, [44, 52, 60], 0.74);
+        : isDimmed
+          ? blendColor(lamp.color, [62, 70, 78], 0.68)
+          : isActive
+            ? blendColor(lamp.color, [255, 255, 255], 0.12)
+            : blendColor(lamp.color, [44, 52, 60], 0.74);
       const glowColor = isActive
-        ? blendColor(lamp.glowColor, [255, 255, 255], isDimmed ? 0.08 : 0.16)
+        ? blendColor(lamp.glowColor, isDimmed ? [78, 84, 92] : [255, 255, 255], isDimmed ? 0.72 : 0.16)
         : blendColor(lamp.glowColor, [90, 98, 108], 0.7);
 
       const outerGlow = glowAlpha(
@@ -486,7 +488,7 @@ function macosVariant() {
       compositePixel(
         px,
         bodyColor,
-        body * (isActive ? (isDimmed ? 0.82 : 0.998) : isNeutral ? 0.28 : 0.42)
+        body * (isActive ? (isDimmed ? 0.46 : 0.998) : isNeutral ? 0.28 : 0.42)
       );
       compositePixel(
         px,
@@ -496,50 +498,50 @@ function macosVariant() {
       compositePixel(
         px,
         highlightColor(bodyColor, isActive ? (isDimmed ? 0.24 : 0.38) : 0.08),
-        topBloom * body * (isActive ? (isDimmed ? 0.24 : 0.44) : 0.08)
+        topBloom * body * (isActive ? (isDimmed ? 0.08 : 0.44) : 0.08)
       );
       if (haloRing > 0) {
         compositePixel(
           px,
           pastelColor(lamp.glowColor, 0.82),
-          haloRing * (isActive ? (isDimmed ? 0.16 : 0.28) : isNeutral ? 0.03 : 0.04)
+          haloRing * (isActive ? (isDimmed ? 0.04 : 0.28) : isNeutral ? 0.03 : 0.04)
         );
       }
       if (glassWash > 0) {
         compositePixel(
           px,
           highlightColor(bodyColor, isActive ? (isDimmed ? 0.28 : 0.5) : 0.1),
-          glassWash * body * (isActive ? (isDimmed ? 0.18 : 0.34) : 0.06)
+          glassWash * body * (isActive ? (isDimmed ? 0.06 : 0.34) : 0.06)
         );
       }
       if (innerLift > 0) {
         compositePixel(
           px,
           FRAME_GLOSS,
-          innerLift * body * (isActive ? (isDimmed ? 0.14 : 0.26) : 0.05)
+          innerLift * body * (isActive ? (isDimmed ? 0.04 : 0.26) : 0.05)
         );
       }
       if (lowerReflect > 0) {
         compositePixel(
           px,
           shadeColor(bodyColor, isActive ? (isDimmed ? 0.13 : 0.08) : 0.18),
-          lowerReflect * body * (isActive ? (isDimmed ? 0.06 : 0.11) : 0.03)
+          lowerReflect * body * (isActive ? (isDimmed ? 0.02 : 0.11) : 0.03)
         );
       }
       compositePixel(
         px,
         FRAME_GLOSS,
-        highlight * (isActive ? (isDimmed ? 0.32 : 0.58) : isNeutral ? 0.1 : 0.13)
+        highlight * (isActive ? (isDimmed ? 0.08 : 0.58) : isNeutral ? 0.1 : 0.13)
       );
       compositePixel(
         px,
-        FRAME_GLOSS,
-        coreGlow * body * (isActive ? (isDimmed ? 0.22 : 0.48) : isNeutral ? 0.06 : 0.08)
+        pastelColor(lamp.glowColor, 0.8),
+        coreGlow * body * (isActive ? (isDimmed ? 0.05 : 0.48) : isNeutral ? 0.06 : 0.08)
       );
       compositePixel(
         px,
         pastelColor(bodyColor, 0.54),
-        ring * (isActive ? (isDimmed ? 0.18 : 0.3) : 0.04)
+        ring * (isActive ? (isDimmed ? 0.05 : 0.3) : 0.04)
       );
     }
   };

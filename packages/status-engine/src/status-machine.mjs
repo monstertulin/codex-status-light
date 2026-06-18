@@ -20,6 +20,8 @@ export function createInitialStatus(now = Date.now()) {
 
 function runningReason(kind) {
   switch (kind) {
+    case "approval_required":
+      return "等待你的授权";
     case "turn_started":
       return "Codex 已开始新一轮";
     case "thinking":
@@ -106,10 +108,33 @@ function idleReasonAfterAttention(kind) {
   }
 }
 
+function isContinuationRunningKind(kind) {
+  return (
+    kind === "thinking" ||
+    kind === "tool_running" ||
+    kind === "replying" ||
+    kind === "network_retry" ||
+    kind === "running"
+  );
+}
+
 export function reduceEvent(currentStatus, event, options = {}) {
   const staleMs = options.runningStaleMs ?? DEFAULT_RUNNING_STALE_MS;
   const at = event.at ?? Date.now();
   const threadId = event.threadId ?? currentStatus.threadId ?? null;
+
+  if (
+    currentStatus.lastEventKind === "cooldown" &&
+    isContinuationRunningKind(event.kind)
+  ) {
+    return createSnapshot({
+      state: LIGHT_STATES.RUNNING,
+      reason: "Codex 刚完成任务，黄灯会短暂停留",
+      lastEventKind: "cooldown",
+      lastEventAt: currentStatus.lastEventAt,
+      threadId
+    });
+  }
 
   switch (event.kind) {
     case "turn_completed":
@@ -125,6 +150,7 @@ export function reduceEvent(currentStatus, event, options = {}) {
     case "tool_running":
     case "replying":
     case "network_retry":
+    case "approval_required":
     case "running":
       return createSnapshot({
         state: LIGHT_STATES.RUNNING,
@@ -180,6 +206,10 @@ export function deriveStatus(currentStatus, options = {}) {
       lastEventAt: currentStatus.lastEventAt,
       threadId: currentStatus.threadId
     });
+  }
+
+  if (currentStatus.lastEventKind === "approval_required") {
+    return currentStatus;
   }
 
   if (

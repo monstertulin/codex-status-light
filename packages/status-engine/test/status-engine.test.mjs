@@ -10,6 +10,7 @@ import {
   deriveStatus,
   LIGHT_COLORS,
   LIGHT_STATES,
+  reduceEvent,
   reduceLogLine,
   resolveCodexHome,
   resolveSignalFiles
@@ -49,11 +50,31 @@ test("resolveSignalFiles prefers sqlite subdirectory when present", () => {
     codexHome: "/Users/demo/.codex",
     existsSync: (targetPath) =>
       targetPath === "/Users/demo/.codex/sqlite/logs_2.sqlite" ||
-      targetPath === "/Users/demo/.codex/sqlite/state_5.sqlite"
+      targetPath === "/Users/demo/.codex/sqlite/state_5.sqlite",
+    statSync: () => ({ mtimeMs: 100 })
   });
 
   assert.equal(files.logsSqlite, "/Users/demo/.codex/sqlite/logs_2.sqlite");
   assert.equal(files.stateSqlite, "/Users/demo/.codex/sqlite/state_5.sqlite");
+});
+
+test("resolveSignalFiles prefers the fresher root sqlite files when both locations exist", () => {
+  const files = resolveSignalFiles({
+    codexHome: "/Users/demo/.codex",
+    existsSync: (targetPath) =>
+      [
+        "/Users/demo/.codex/logs_2.sqlite",
+        "/Users/demo/.codex/state_5.sqlite",
+        "/Users/demo/.codex/sqlite/logs_2.sqlite",
+        "/Users/demo/.codex/sqlite/state_5.sqlite"
+      ].includes(targetPath),
+    statSync: (targetPath) => ({
+      mtimeMs: targetPath.includes("/sqlite/") ? 100 : 200
+    })
+  });
+
+  assert.equal(files.logsSqlite, "/Users/demo/.codex/logs_2.sqlite");
+  assert.equal(files.stateSqlite, "/Users/demo/.codex/state_5.sqlite");
 });
 
 test("resolveSignalFiles uses Windows separators when asked", () => {
@@ -61,7 +82,8 @@ test("resolveSignalFiles uses Windows separators when asked", () => {
     platform: "win32",
     codexHome: "C:\\Users\\demo\\.codex",
     existsSync: (targetPath) =>
-      targetPath === "C:\\Users\\demo\\.codex\\sqlite\\state_5.sqlite"
+      targetPath === "C:\\Users\\demo\\.codex\\sqlite\\state_5.sqlite",
+    statSync: () => ({ mtimeMs: 100 })
   });
 
   assert.equal(files.logFile, "C:\\Users\\demo\\.codex\\log\\codex-tui.log");
@@ -102,6 +124,53 @@ test("response.in_progress keeps the light yellow", () => {
   assert.equal(running.reason, "Codex 正在读取上下文");
 });
 
+test("codex user prompt starts a new turn immediately", () => {
+  const started = reduceLogLine(
+    createInitialStatus(1_000),
+    'session_loop{thread_id=abc-123}:submission_dispatch{otel.name="op.dispatch.user_input" submission.id="sub_123" codex.op="user_input"}: event.name="codex.user_prompt" prompt_length=8 event.timestamp=2026-06-13T03:26:05.871Z conversation.id=abc-123'
+  );
+
+  assert.equal(started.state, LIGHT_STATES.RUNNING);
+  assert.equal(started.threadId, "abc-123");
+  assert.equal(started.lastEventKind, "turn_started");
+});
+
+test("run sampling request activity is labeled as thinking", () => {
+  const running = reduceLogLine(
+    createInitialStatus(1_000),
+    'session_loop{thread_id=abc-123}:submission_dispatch{otel.name="op.dispatch.user_input"}:turn{otel.name="session_task.turn"}:run_turn:run_sampling_request{turn_id=turn_123}:stream_request:model_client.stream_responses_api{}'
+  );
+
+  assert.equal(running.state, LIGHT_STATES.RUNNING);
+  assert.equal(running.threadId, "abc-123");
+  assert.equal(running.lastEventKind, "thinking");
+  assert.equal(running.reason, "Codex 正在读取上下文");
+});
+
+test("approval required stays yellow without staling", () => {
+  const pending = reduceEvent(
+    createInitialStatus(1_000),
+    {
+      kind: "approval_required",
+      at: 2_000,
+      threadId: "abc-123"
+    },
+    {
+      runningStaleMs: DEFAULT_RUNNING_STALE_MS
+    }
+  );
+  const later = deriveStatus(pending, {
+    now: pending.lastEventAt + DEFAULT_RUNNING_STALE_MS + 30_000,
+    runningStaleMs: DEFAULT_RUNNING_STALE_MS
+  });
+
+  assert.equal(later.state, LIGHT_STATES.RUNNING);
+  assert.equal(later.color, LIGHT_COLORS[LIGHT_STATES.RUNNING]);
+  assert.equal(later.threadId, "abc-123");
+  assert.equal(later.lastEventKind, "approval_required");
+  assert.equal(later.reason, "等待你的授权");
+});
+
 test("function call activity is labeled as tool work", () => {
   const running = reduceLogLine(
     createInitialStatus(1_000),
@@ -111,6 +180,29 @@ test("function call activity is labeled as tool work", () => {
   assert.equal(running.state, LIGHT_STATES.RUNNING);
   assert.equal(running.lastEventKind, "tool_running");
   assert.equal(running.reason, "Codex 正在运行工具");
+});
+
+test("custom tool input activity is labeled as tool work", () => {
+  const running = reduceLogLine(
+    createInitialStatus(1_000),
+    'event.name="codex.sse_event" event.kind=response.custom_tool_call_input.delta event.timestamp=2026-06-13T03:20:37.126Z conversation.id=abc-123'
+  );
+
+  assert.equal(running.state, LIGHT_STATES.RUNNING);
+  assert.equal(running.threadId, "abc-123");
+  assert.equal(running.lastEventKind, "tool_running");
+  assert.equal(running.reason, "Codex 正在运行工具");
+});
+
+test("app server agent message delta is labeled as replying", () => {
+  const running = reduceLogLine(
+    createInitialStatus(1_000),
+    "app-server event: item/agentMessage/delta targeted_connections=1"
+  );
+
+  assert.equal(running.state, LIGHT_STATES.RUNNING);
+  assert.equal(running.lastEventKind, "replying");
+  assert.equal(running.reason, "Codex 正在生成回复");
 });
 
 test("completion holds the light yellow briefly", () => {
@@ -142,6 +234,48 @@ test("completion hold expires back to green", () => {
   assert.equal(settled.state, LIGHT_STATES.IDLE);
   assert.equal(settled.lastEventKind, "turn_completed");
   assert.equal(settled.reason, "本轮已完成");
+});
+
+test("completion hold ignores trailing thinking events from the same turn", () => {
+  const cooling = reduceLogLine(
+    createInitialStatus(1_000),
+    "2026-06-05T01:00:05Z TRACE codex_api::sse::responses|SSE event: {\"type\":\"response.completed\"}"
+  );
+  const stillCooling = reduceLogLine(
+    cooling,
+    "2026-06-05T01:00:06Z TRACE codex_api::sse::responses|SSE event: {\"type\":\"response.in_progress\"}"
+  );
+
+  assert.equal(stillCooling.state, LIGHT_STATES.RUNNING);
+  assert.equal(stillCooling.lastEventKind, "cooldown");
+  assert.equal(stillCooling.lastEventAt, cooling.lastEventAt);
+  assert.equal(stillCooling.reason, "Codex 刚完成任务，黄灯会短暂停留");
+});
+
+test("completion hold still yields to a real new turn start", () => {
+  const cooling = reduceLogLine(
+    createInitialStatus(1_000),
+    "2026-06-05T01:00:05Z TRACE codex_api::sse::responses|SSE event: {\"type\":\"response.completed\"}"
+  );
+  const restarted = reduceLogLine(
+    cooling,
+    "2026-06-05T01:00:06Z INFO session_loop{thread_id=abc-123}:submission_dispatch{otel.name=\"op.dispatch.user_input\"}:turn{otel.name=\"session_task.turn\"}: codex_core::tasks: new"
+  );
+
+  assert.equal(restarted.state, LIGHT_STATES.RUNNING);
+  assert.equal(restarted.lastEventKind, "turn_started");
+  assert.equal(restarted.reason, "Codex 已开始新一轮");
+});
+
+test("app server completed event maps to turn completed", () => {
+  const cooling = reduceLogLine(
+    createInitialStatus(1_000),
+    "app-server event: item/completed targeted_connections=1"
+  );
+
+  assert.equal(cooling.state, LIGHT_STATES.RUNNING);
+  assert.equal(cooling.lastEventKind, "cooldown");
+  assert.equal(cooling.reason, "Codex 刚完成任务，黄灯会短暂停留");
 });
 
 test("interrupt transitions the light to red", () => {

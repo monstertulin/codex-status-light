@@ -3,11 +3,13 @@
 mod status_runtime;
 
 use status_runtime::{
-    codex_log_path, read_status_snapshot as read_live_status_snapshot, write_snapshot_file,
-    StatusSnapshot,
+    codex_home_path, codex_log_path, read_status_snapshot as read_live_status_snapshot,
+    write_snapshot_file, StatusSnapshot,
 };
 use std::{
     env,
+    fs::{self, OpenOptions},
+    io::Write,
     path::Path,
     process::Command,
     sync::{Arc, Mutex},
@@ -36,6 +38,96 @@ impl SnapshotStore {
             *current = Some(snapshot);
         }
     }
+}
+
+struct InstanceGuard {
+    path: std::path::PathBuf,
+}
+
+impl Drop for InstanceGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn instance_lock_path() -> std::path::PathBuf {
+    codex_home_path().join("status-light").join("app-instance.lock")
+}
+
+fn read_instance_pid(path: &Path) -> Option<u32> {
+    fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
+fn process_exists(pid: u32) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .map(|output| {
+                let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+                stdout.contains(&pid.to_string()) && !stdout.contains("no tasks are running")
+            })
+            .unwrap_or(false);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|output| {
+                if output.status.success() {
+                    return true;
+                }
+
+                String::from_utf8_lossy(&output.stderr)
+                    .to_ascii_lowercase()
+                    .contains("operation not permitted")
+            })
+            .unwrap_or(false)
+    }
+}
+
+fn acquire_instance_guard() -> Result<Option<InstanceGuard>, String> {
+    let path = instance_lock_path();
+    let current_pid = std::process::id();
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("failed to resolve lock dir for {}", path.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+
+    for _ in 0..2 {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                writeln!(file, "{current_pid}")
+                    .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+                return Ok(Some(InstanceGuard { path }));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if let Some(existing_pid) = read_instance_pid(&path) {
+                    if existing_pid != current_pid && process_exists(existing_pid) {
+                        return Ok(None);
+                    }
+                }
+
+                let _ = fs::remove_file(&path);
+            }
+            Err(error) => {
+                return Err(format!("failed to create {}: {error}", path.display()));
+            }
+        }
+    }
+
+    Err(format!(
+        "failed to acquire single-instance lock at {}",
+        path.display()
+    ))
 }
 
 fn push_snapshot_to_window(app: &AppHandle<Wry>, snapshot: &StatusSnapshot) -> Result<(), String> {
@@ -179,8 +271,8 @@ fn tray_image_for_color(color: &str) -> Result<Image<'static>, String> {
         .map_err(|error| format!("failed to create tray icon image: {error}"))
 }
 
-const DEFAULT_ACTIVE_POLL_MS: u64 = 400;
-const DEFAULT_APPROVAL_POLL_MS: u64 = 500;
+const DEFAULT_ACTIVE_POLL_MS: u64 = 250;
+const DEFAULT_APPROVAL_POLL_MS: u64 = 350;
 const DEFAULT_IDLE_POLL_MS: u64 = 900;
 const DEFAULT_UNAVAILABLE_GRACE_MS: u64 = 4_000;
 const MIN_POLL_MS: u64 = 250;
@@ -409,11 +501,21 @@ fn read_status_snapshot(
     Ok(snapshot)
 }
 
+fn spawn_snapshot_refresh(app: AppHandle<Wry>, snapshot_store: SnapshotStore) {
+    thread::spawn(move || {
+        let Ok(snapshot) = read_live_status_snapshot() else {
+            return;
+        };
+
+        snapshot_store.write(snapshot.clone());
+        let _ = write_snapshot_file(&snapshot);
+        let _ = push_snapshot_to_window(&app, &snapshot);
+    });
+}
+
 fn show_main_window(app: &AppHandle<Wry>) {
-    let snapshot = app
-        .state::<SnapshotStore>()
-        .read()
-        .or_else(|| read_live_status_snapshot().ok());
+    let snapshot_store = app.state::<SnapshotStore>().inner().clone();
+    let snapshot = snapshot_store.read();
 
     if let Some(snapshot) = snapshot {
         let _ = push_snapshot_to_window(app, &snapshot);
@@ -424,9 +526,23 @@ fn show_main_window(app: &AppHandle<Wry>) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+
+    spawn_snapshot_refresh(app.clone(), snapshot_store);
 }
 
 fn main() {
+    let _instance_guard = match acquire_instance_guard() {
+        Ok(Some(guard)) => guard,
+        Ok(None) => {
+            eprintln!("another Codex status light instance is already running");
+            return;
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            return;
+        }
+    };
+
     tauri::Builder::default()
         .manage(SnapshotStore::default())
         .invoke_handler(tauri::generate_handler![read_status_snapshot])

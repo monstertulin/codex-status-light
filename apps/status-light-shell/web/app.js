@@ -1,6 +1,8 @@
 const SNAPSHOT_URL = "./runtime/current-status.json";
 const POLL_INTERVAL_MS = 500;
-const TAURI_FALLBACK_POLL_INTERVAL_MS = 5000;
+const TAURI_BOOT_POLL_INTERVAL_MS = 250;
+const TAURI_VISIBLE_POLL_INTERVAL_MS = 300;
+const TAURI_HIDDEN_POLL_INTERVAL_MS = 1200;
 const MISSING_GRACE_MS = 4000;
 
 const refs = {
@@ -13,7 +15,10 @@ const refs = {
   colorValue: document.getElementById("color-value"),
   eventValue: document.getElementById("event-value"),
   threadValue: document.getElementById("thread-value"),
-  updatedValue: document.getElementById("updated-value")
+  updatedValue: document.getElementById("updated-value"),
+  renderedValue: document.getElementById("rendered-value"),
+  latencyValue: document.getElementById("latency-value"),
+  sourceValue: document.getElementById("source-value")
 };
 
 const STATE_LABELS = {
@@ -223,9 +228,29 @@ let hasSnapshot = false;
 let lastRenderKey = null;
 let isLoading = false;
 let lastSuccessAt = 0;
+let lastSnapshotSource = "unknown";
 
 function embeddedSnapshot() {
   return window.__STATUS_LIGHT_LAST_SNAPSHOT__ ?? null;
+}
+
+function isProbablyTauriRuntime() {
+  if (hasTauriBridge()) {
+    return true;
+  }
+
+  const protocol = window.location.protocol?.toLowerCase?.() ?? "";
+  if (protocol && protocol !== "http:" && protocol !== "https:") {
+    return true;
+  }
+
+  const host = window.location.host?.toLowerCase?.() ?? "";
+  if (host === "tauri.localhost" || host.endsWith(".tauri.localhost")) {
+    return true;
+  }
+
+  const userAgent = navigator.userAgent?.toLowerCase?.() ?? "";
+  return userAgent.includes("tauri");
 }
 
 function formatTimestamp(ms) {
@@ -239,6 +264,33 @@ function formatTimestamp(ms) {
 
 function eventLabelFor(kind) {
   return EVENT_LABELS[kind] ?? kind ?? "unknown";
+}
+
+function formatLatency(ms) {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return "n/a";
+  }
+
+  return `${Math.round(ms)} ms`;
+}
+
+function sourceLabelFor(source) {
+  switch (source) {
+    case "push":
+      return "push";
+    case "invoke":
+      return "invoke";
+    case "embedded":
+      return "embedded";
+    case "web-runtime":
+      return "web-runtime";
+    case "tauri-waiting":
+      return "tauri-waiting";
+    case "missing":
+      return "missing";
+    default:
+      return source ?? "unknown";
+  }
 }
 
 function snapshotKey(snapshot) {
@@ -273,17 +325,62 @@ function renderMissingState(force = false) {
   refs.eventValue.textContent = "启动中";
   refs.threadValue.textContent = "n/a";
   refs.updatedValue.textContent = "n/a";
+  refs.renderedValue.textContent = formatTimestamp(Date.now());
+  refs.latencyValue.textContent = "n/a";
+  refs.sourceValue.textContent = sourceLabelFor("missing");
   refs.threadValue.title = "";
   refs.updatedValue.title = "";
+  refs.renderedValue.title = "";
+  refs.latencyValue.title = "";
+  refs.sourceValue.title = "missing";
   lastRenderKey = key;
   hasSnapshot = false;
+  lastSnapshotSource = "missing";
 }
 
-function renderSnapshot(snapshot) {
+function renderTauriWaitingState(force = false) {
+  const key = "__tauri_waiting__";
+  if (!force && lastRenderKey === key) {
+    return;
+  }
+
+  applyTone({
+    color: "neutral",
+    state: "unknown",
+    lastEventKind: "startup"
+  });
+  refs.meaningLabel.textContent = "正在连接原生实时状态";
+  refs.stateLabel.textContent = "等待状态快照";
+  refs.reason.textContent = "原生状态桥正在准备中，页面会直接复用状态栏的实时状态。";
+  refs.substateLabel.textContent =
+    "这个窗口现在不会再读取网页调试快照，所以不会被旧的 runtime 文件误导。";
+  refs.colorValue.textContent = "灰灯";
+  refs.eventValue.textContent = "启动中";
+  refs.threadValue.textContent = "n/a";
+  refs.updatedValue.textContent = "n/a";
+  refs.renderedValue.textContent = formatTimestamp(Date.now());
+  refs.latencyValue.textContent = "n/a";
+  refs.sourceValue.textContent = sourceLabelFor("tauri-waiting");
+  refs.threadValue.title = "";
+  refs.updatedValue.title = "";
+  refs.renderedValue.title = "";
+  refs.latencyValue.title = "";
+  refs.sourceValue.title = "tauri-waiting";
+  lastRenderKey = key;
+  hasSnapshot = false;
+  lastSnapshotSource = "tauri-waiting";
+}
+
+function renderSnapshot(snapshot, source = lastSnapshotSource || "unknown") {
   const key = snapshotKey(snapshot);
   if (key === lastRenderKey) {
     return;
   }
+
+  const renderedAt = Date.now();
+  const latencyMs = snapshot.lastEventAt
+    ? Math.max(0, renderedAt - snapshot.lastEventAt)
+    : null;
 
   applyTone(snapshot);
   refs.meaningLabel.textContent = toneLabelFor(snapshot);
@@ -294,13 +391,21 @@ function renderSnapshot(snapshot) {
   refs.eventValue.textContent = eventLabelFor(snapshot.lastEventKind);
   refs.threadValue.textContent = snapshot.threadId ?? "n/a";
   refs.updatedValue.textContent = formatTimestamp(snapshot.lastEventAt);
+  refs.renderedValue.textContent = formatTimestamp(renderedAt);
+  refs.latencyValue.textContent = formatLatency(latencyMs);
+  refs.sourceValue.textContent = sourceLabelFor(source);
   refs.threadValue.title = snapshot.threadId ?? "";
   refs.updatedValue.title = snapshot.lastEventAt
     ? new Date(snapshot.lastEventAt).toISOString()
     : "";
+  refs.renderedValue.title = new Date(renderedAt).toISOString();
+  refs.latencyValue.title =
+    latencyMs == null ? "" : `${latencyMs}ms since lastEventAt`;
+  refs.sourceValue.title = source ?? "unknown";
   lastRenderKey = key;
   hasSnapshot = true;
-  lastSuccessAt = Date.now();
+  lastSuccessAt = renderedAt;
+  lastSnapshotSource = source ?? "unknown";
 }
 
 async function loadSnapshotFromTauri() {
@@ -326,11 +431,25 @@ async function loadSnapshot() {
   }
 
   isLoading = true;
+  const tauriRuntime = isProbablyTauriRuntime();
 
   try {
-    if (window.__TAURI_INTERNALS__?.invoke || window.__TAURI__?.core?.invoke) {
+    if (hasTauriBridge()) {
       const snapshot = await loadSnapshotFromTauri();
-      renderSnapshot(snapshot);
+      renderSnapshot(snapshot, "invoke");
+      return;
+    }
+
+    const embedded = embeddedSnapshot();
+    if (embedded) {
+      renderSnapshot(embedded, "embedded");
+      return;
+    }
+
+    if (tauriRuntime) {
+      if (!hasSnapshot || Date.now() - lastSuccessAt > MISSING_GRACE_MS) {
+        renderTauriWaitingState(!hasSnapshot);
+      }
       return;
     }
 
@@ -344,8 +463,15 @@ async function loadSnapshot() {
     }
 
     const snapshot = await response.json();
-    renderSnapshot(snapshot);
+    renderSnapshot(snapshot, "web-runtime");
   } catch {
+    if (tauriRuntime && !hasTauriBridge()) {
+      if (!hasSnapshot || Date.now() - lastSuccessAt > MISSING_GRACE_MS) {
+        renderTauriWaitingState(!hasSnapshot);
+      }
+      return;
+    }
+
     if (!hasSnapshot || Date.now() - lastSuccessAt > MISSING_GRACE_MS) {
       renderMissingState(!hasSnapshot);
     }
@@ -354,20 +480,43 @@ async function loadSnapshot() {
   }
 }
 
+function pollIntervalForCurrentRuntime() {
+  if (hasTauriBridge()) {
+    return document.hidden
+      ? TAURI_HIDDEN_POLL_INTERVAL_MS
+      : TAURI_VISIBLE_POLL_INTERVAL_MS;
+  }
+
+  if (isProbablyTauriRuntime()) {
+    return TAURI_BOOT_POLL_INTERVAL_MS;
+  }
+
+  return POLL_INTERVAL_MS;
+}
+
+function startSnapshotPolling() {
+  async function tick() {
+    await loadSnapshot();
+    window.setTimeout(tick, pollIntervalForCurrentRuntime());
+  }
+
+  void tick();
+}
+
 window.addEventListener("status-light:snapshot", (event) => {
   if (event?.detail) {
-    renderSnapshot(event.detail);
+    renderSnapshot(event.detail, "push");
   }
 });
 
 const initialEmbeddedSnapshot = embeddedSnapshot();
 if (initialEmbeddedSnapshot) {
-  renderSnapshot(initialEmbeddedSnapshot);
+  renderSnapshot(initialEmbeddedSnapshot, "embedded");
 }
 
-loadSnapshot();
+startSnapshotPolling();
 
-if (hasTauriBridge()) {
+if (isProbablyTauriRuntime()) {
   window.addEventListener("focus", () => {
     void loadSnapshot();
   });
@@ -376,7 +525,4 @@ if (hasTauriBridge()) {
       void loadSnapshot();
     }
   });
-  window.setInterval(loadSnapshot, TAURI_FALLBACK_POLL_INTERVAL_MS);
-} else {
-  window.setInterval(loadSnapshot, POLL_INTERVAL_MS);
 }

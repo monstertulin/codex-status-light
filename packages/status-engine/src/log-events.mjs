@@ -20,8 +20,24 @@ const RULES = [
     tokens: ["retrying sampling request"]
   },
   {
+    kind: "turn_started",
+    tokens: ['event.name="codex.user_prompt"']
+  },
+  {
+    kind: "thinking",
+    tokens: ["run_sampling_request"]
+  },
+  {
+    kind: "thinking",
+    tokens: ["stream_request"]
+  },
+  {
     kind: "turn_error",
     tokens: ["Turn error"]
+  },
+  {
+    kind: "turn_completed",
+    tokens: ["app-server event: item/completed"]
   },
   {
     kind: "turn_completed",
@@ -40,12 +56,20 @@ const RULES = [
     tokens: ["response.function_call_arguments.delta"]
   },
   {
+    kind: "tool_running",
+    tokens: ["response.custom_tool_call_input.delta"]
+  },
+  {
     kind: "replying",
     tokens: ["response.output_item.added", "\"type\":\"message\""]
   },
   {
     kind: "replying",
     tokens: ["response.output_text.delta"]
+  },
+  {
+    kind: "replying",
+    tokens: ["app-server event: item/agentMessage/delta"]
   },
   {
     kind: "thinking",

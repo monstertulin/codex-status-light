@@ -11,9 +11,12 @@ import { LIGHT_STATES } from "./status-contract.mjs";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_SQLITE_EVENT_LIMIT = 120;
+const DEFAULT_SQLITE_APPROVAL_LIMIT = 80;
 const DEFAULT_THREAD_CANDIDATE_SCAN_LIMIT = 64;
-const DEFAULT_GLOBAL_THREAD_LIMIT = 8;
 const DEFAULT_GLOBAL_THREAD_WINDOW_MS = 600_000;
+const GLOBAL_WORKSPACE_PREFERENCE_GRACE_MS = 8_000;
+const APPROVAL_PENDING_FALLBACK_MS = 60_000;
+const DOMINANT_COMPLETED_FRESH_MS = 10_000;
 const DOMINANT_RUNNING_FRESH_MS = 20_000;
 const DOMINANT_ATTENTION_FRESH_MS = 15_000;
 const SIGNAL_BODY_FILTERS = [
@@ -21,10 +24,16 @@ const SIGNAL_BODY_FILTERS = [
   "%interrupt received%",
   "%turn-ended%",
   "%retrying sampling request%",
+  "%codex.user_prompt%",
   "%session_task.turn%",
+  "%run_sampling_request%",
+  "%stream_request%",
+  "%app-server event: item/agentMessage/delta%",
+  "%app-server event: item/completed%",
   "%response.completed%",
   "%response.in_progress%",
   "%response.output_item.added%",
+  "%response.custom_tool_call_input.delta%",
   "%response.output_text.delta%",
   "%response.function_call_arguments.delta%",
   "%response.output_item.done%"
@@ -92,9 +101,20 @@ function snapshotPriority(snapshot, now) {
     statePriority = 5;
   } else if (
     snapshot.state === LIGHT_STATES.RUNNING &&
+    snapshot.lastEventKind === "approval_required"
+  ) {
+    statePriority = 4;
+  } else if (
+    snapshot.state === LIGHT_STATES.RUNNING &&
     ageMs <= DOMINANT_RUNNING_FRESH_MS
   ) {
     statePriority = 3;
+  } else if (
+    snapshot.state === LIGHT_STATES.IDLE &&
+    snapshot.lastEventKind === "turn_completed" &&
+    ageMs <= DOMINANT_COMPLETED_FRESH_MS
+  ) {
+    statePriority = 2;
   } else if (snapshot.state === LIGHT_STATES.ATTENTION) {
     statePriority = 2;
   } else if (snapshot.state === LIGHT_STATES.RUNNING) {
@@ -138,6 +158,33 @@ function classifySqliteRow(row) {
     threadId: row.thread_id ?? event.threadId ?? extractThreadId(body) ?? null,
     raw: body
   };
+}
+
+function extractMarkerValue(text, marker) {
+  const startIndex = text.indexOf(marker);
+  if (startIndex === -1) {
+    return null;
+  }
+
+  const suffix = text.slice(startIndex + marker.length);
+  const match = suffix.match(/^[A-Za-z0-9_-]+/u);
+  return match?.[0] ?? null;
+}
+
+function extractCallId(text) {
+  return (
+    extractMarkerValue(text, 'call_id="') ??
+    extractMarkerValue(text, "call_id=") ??
+    extractMarkerValue(text, '"call_id":"')
+  );
+}
+
+function extractToolName(text) {
+  return (
+    extractMarkerValue(text, 'tool_name="') ??
+    extractMarkerValue(text, "tool_name=") ??
+    extractMarkerValue(text, "ToolCall: ")
+  );
 }
 
 async function selectRecentThreadCandidates(stateSqlitePath, options = {}) {
@@ -239,10 +286,136 @@ async function selectThreadEvents(logsSqlitePath, threadId, options = {}) {
   return rows.reverse();
 }
 
+async function selectApprovalRows(logsSqlitePath, threadId, options = {}) {
+  const queryOptions = options.queryOptions ?? options;
+  const conversationPattern = `%conversation.id=${threadId}%`;
+  const threadPattern = `%thread_id=${threadId}%`;
+  const sql = [
+    "select ts, ts_nanos, thread_id, substr(feedback_log_body, 1, 12000) as feedback_log_body",
+    "from logs",
+    `where (thread_id = ${sqlLiteral(threadId)}`,
+    `or feedback_log_body like ${sqlLiteral(conversationPattern)}`,
+    `or feedback_log_body like ${sqlLiteral(threadPattern)})`,
+    "and feedback_log_body is not null",
+    "and (",
+    "(feedback_log_body like '%handle_output_item_done: ToolCall:%'",
+    `and feedback_log_body like ${sqlLiteral('%"sandbox_permissions":"require_escalated"%')}`,
+    `and feedback_log_body like ${sqlLiteral('%"justification":"%')})`,
+    "or feedback_log_body like '%handle_output_item_done: ToolCall: mcp__%'",
+    "or feedback_log_body like '%event.name=\"codex.tool_decision\"%'",
+    "or feedback_log_body like '%event.name=\"codex.tool_result\"%'",
+    ")",
+    "order by ts desc, ts_nanos desc, id desc",
+    `limit ${options.approvalLimit ?? DEFAULT_SQLITE_APPROVAL_LIMIT}`
+  ].join(" ");
+
+  return querySqliteJson(logsSqlitePath, sql, queryOptions);
+}
+
+function isApprovalRequest(text) {
+  const toolCallIndex = text.indexOf("handle_output_item_done: ToolCall:");
+  if (toolCallIndex === -1) {
+    return false;
+  }
+
+  if (text.includes("handle_output_item_done: ToolCall: mcp__")) {
+    return true;
+  }
+
+  const permissionIndex = text.indexOf(
+    '"sandbox_permissions":"require_escalated"',
+    toolCallIndex
+  );
+  if (permissionIndex === -1 || permissionIndex - toolCallIndex > 512) {
+    return false;
+  }
+
+  return text.indexOf('"justification":"', permissionIndex) !== -1;
+}
+
+function isApprovalResolution(text) {
+  return (
+    text.includes('event.name="codex.tool_decision"') ||
+    text.includes('event.name="codex.tool_result"')
+  );
+}
+
+function pendingApprovalFromRows(rows, now) {
+  const resolvedCallIds = new Set();
+  const resolvedToolNames = new Set();
+  let sawResolutionAfter = false;
+
+  for (const row of rows) {
+    const body = row.feedback_log_body ?? "";
+
+    if (isApprovalResolution(body)) {
+      sawResolutionAfter = true;
+      const callId = extractCallId(body);
+      const toolName = extractToolName(body);
+      if (callId) {
+        resolvedCallIds.add(callId);
+      }
+      if (toolName) {
+        resolvedToolNames.add(toolName);
+      }
+      continue;
+    }
+
+    if (!isApprovalRequest(body)) {
+      continue;
+    }
+
+    const event = {
+      kind: "approval_required",
+      at: eventTimeMs(row),
+      threadId: row.thread_id ?? extractThreadId(body) ?? null
+    };
+    const callId = extractCallId(body);
+    if (callId) {
+      if (!resolvedCallIds.has(callId)) {
+        return event;
+      }
+      continue;
+    }
+
+    const toolName = extractToolName(body);
+    if (toolName) {
+      if (resolvedToolNames.has(toolName)) {
+        continue;
+      }
+    } else if (sawResolutionAfter) {
+      continue;
+    }
+
+    if (now - event.at <= APPROVAL_PENDING_FALLBACK_MS) {
+      return event;
+    }
+  }
+
+  return null;
+}
+
 async function selectThreadStatus(logsSqlitePath, threadId, options = {}) {
-  const rows = await selectThreadEvents(logsSqlitePath, threadId, options);
   const now = options.now ?? Date.now();
   const runningStaleMs = options.runningStaleMs;
+  const approvalRows = await selectApprovalRows(logsSqlitePath, threadId, options);
+  const approvalEvent = pendingApprovalFromRows(approvalRows, now);
+
+  if (approvalEvent) {
+    return {
+      latestRealEventAt: Math.max(
+        approvalEvent.at,
+        ...approvalRows.map((row) => eventTimeMs(row))
+      ),
+      snapshot: reduceEvent(createInitialStatus(now), approvalEvent, {
+        runningStaleMs
+      }),
+      cwd: null,
+      workspaceMatch: null
+    };
+  }
+
+  const rows = await selectThreadEvents(logsSqlitePath, threadId, options);
   let status = createInitialStatus(options.initialNow ?? now);
   let latestRealEventAt = null;
 
@@ -258,7 +431,9 @@ async function selectThreadStatus(logsSqlitePath, threadId, options = {}) {
 
   return {
     latestRealEventAt,
-    snapshot: deriveStatus(status, { now, runningStaleMs })
+    snapshot: deriveStatus(status, { now, runningStaleMs }),
+    cwd: null,
+    workspaceMatch: null
   };
 }
 
@@ -278,6 +453,92 @@ function pickDominantSnapshot(snapshots, now) {
   }
 
   return dominant ?? createInitialStatus(now);
+}
+
+function workspaceRunningPreferredSnapshot(evaluations, options = {}) {
+  if (!options.cwd || evaluations.length === 0) {
+    return null;
+  }
+
+  const latestGlobalEventAt = Math.max(
+    ...evaluations
+      .map((evaluation) => evaluation.latestRealEventAt)
+      .filter((value) => Number.isFinite(value))
+  );
+
+  if (!Number.isFinite(latestGlobalEventAt)) {
+    return null;
+  }
+
+  const cutoff = latestGlobalEventAt - GLOBAL_WORKSPACE_PREFERENCE_GRACE_MS;
+  let preferred = null;
+
+  for (const evaluation of evaluations) {
+    if (
+      evaluation.snapshot.state !== LIGHT_STATES.RUNNING ||
+      evaluation.snapshot.lastEventKind === "approval_required" ||
+      !Number.isFinite(evaluation.latestRealEventAt) ||
+      evaluation.latestRealEventAt < cutoff
+    ) {
+      continue;
+    }
+
+    const workspaceMatch =
+      evaluation.workspaceMatch ??
+      pathMatchScore(options.cwd, evaluation.cwd);
+    if (!workspaceMatch) {
+      continue;
+    }
+
+    const candidate = {
+      ...evaluation,
+      workspaceMatch
+    };
+
+    if (
+      !preferred ||
+      comparePriority(candidate.workspaceMatch, preferred.workspaceMatch) > 0 ||
+      (comparePriority(candidate.workspaceMatch, preferred.workspaceMatch) === 0 &&
+        candidate.latestRealEventAt > preferred.latestRealEventAt) ||
+      (comparePriority(candidate.workspaceMatch, preferred.workspaceMatch) === 0 &&
+        candidate.latestRealEventAt === preferred.latestRealEventAt &&
+        comparePriority(
+          snapshotPriority(candidate.snapshot, options.now ?? Date.now()),
+          snapshotPriority(preferred.snapshot, options.now ?? Date.now())
+        ) > 0)
+    ) {
+      preferred = candidate;
+    }
+  }
+
+  return preferred?.snapshot ?? null;
+}
+
+function pickDominantEvaluation(evaluations, options = {}) {
+  if (evaluations.length === 0) {
+    return createInitialStatus(options.now ?? Date.now());
+  }
+
+  const now = options.now ?? Date.now();
+  const dominant = pickDominantSnapshot(
+    evaluations.map((item) => item.snapshot),
+    now
+  );
+
+  if (
+    dominant.state === LIGHT_STATES.RUNNING &&
+    dominant.lastEventKind !== "approval_required"
+  ) {
+    const preferred = workspaceRunningPreferredSnapshot(evaluations, {
+      cwd: options.cwd,
+      now
+    });
+    if (preferred) {
+      return preferred;
+    }
+  }
+
+  return dominant;
 }
 
 export function defaultLogsSqlitePath(options = {}) {
@@ -312,12 +573,20 @@ export async function deriveStatusFromSqliteFiles(logsSqlitePath, stateSqlitePat
   const evaluations = [];
 
   for (const candidate of candidates) {
-    const evaluation = await selectThreadStatus(logsSqlitePath, candidate.id, options);
+    const evaluation = await selectThreadStatus(
+      logsSqlitePath,
+      candidate.id,
+      options
+    );
     if (evaluation.latestRealEventAt === null || evaluation.latestRealEventAt < cutoff) {
       continue;
     }
 
-    evaluations.push(evaluation);
+    evaluations.push({
+      ...evaluation,
+      cwd: candidate.cwd ?? null,
+      workspaceMatch: pathMatchScore(options.cwd, candidate.cwd)
+    });
   }
 
   evaluations.sort((left, right) => {
@@ -335,8 +604,5 @@ export async function deriveStatusFromSqliteFiles(logsSqlitePath, stateSqlitePat
     return createInitialStatus(initialNow);
   }
 
-  return pickDominantSnapshot(
-    evaluations.slice(0, DEFAULT_GLOBAL_THREAD_LIMIT).map((item) => item.snapshot),
-    now
-  );
+  return pickDominantEvaluation(evaluations, options);
 }

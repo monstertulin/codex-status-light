@@ -42,23 +42,30 @@ const DEFAULT_ERROR_HOLD_MS: u64 = 10_000;
 const DEFAULT_SQLITE_EVENT_LIMIT: usize = 120;
 const DEFAULT_SQLITE_APPROVAL_LIMIT: usize = 80;
 const DEFAULT_THREAD_CANDIDATE_SCAN_LIMIT: usize = 64;
-const DEFAULT_GLOBAL_THREAD_LIMIT: usize = 8;
 const DEFAULT_GLOBAL_THREAD_WINDOW_MS: u64 = 600_000;
+const GLOBAL_WORKSPACE_PREFERENCE_GRACE_MS: u64 = 8_000;
 const APPROVAL_PENDING_FALLBACK_MS: u64 = 60_000;
 const RETRY_STALE_MS: u64 = 45_000;
 const ACTIVE_PHASE_STALE_MS: u64 = 120_000;
+const DOMINANT_COMPLETED_FRESH_MS: u64 = 10_000;
 const DOMINANT_RUNNING_FRESH_MS: u64 = 20_000;
 const DOMINANT_ATTENTION_FRESH_MS: u64 = 15_000;
 
-const SIGNAL_BODY_FILTERS: [&str; 11] = [
+const SIGNAL_BODY_FILTERS: [&str; 17] = [
     "%Turn error%",
     "%interrupt received%",
     "%turn-ended%",
     "%retrying sampling request%",
+    "%codex.user_prompt%",
     "%session_task.turn%",
+    "%run_sampling_request%",
+    "%stream_request%",
+    "%app-server event: item/agentMessage/delta%",
+    "%app-server event: item/completed%",
     "%response.completed%",
     "%response.in_progress%",
     "%response.output_item.added%",
+    "%response.custom_tool_call_input.delta%",
     "%response.output_item.done%",
     "%response.output_text.delta%",
     "%response.function_call_arguments.delta%",
@@ -102,6 +109,8 @@ struct ThreadCandidate {
 struct ThreadStatusEvaluation {
     snapshot: StatusSnapshot,
     latest_real_event_at: Option<u64>,
+    cwd: PathBuf,
+    workspace_match: Option<(u8, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,11 +147,31 @@ pub fn codex_log_path() -> PathBuf {
 }
 
 fn preferred_sqlite_path(codex_home: &Path, file_name: &str) -> PathBuf {
+    let root_path = codex_home.join(file_name);
     let sqlite_dir_path = codex_home.join("sqlite").join(file_name);
-    if sqlite_dir_path.exists() {
-        sqlite_dir_path
-    } else {
-        codex_home.join(file_name)
+    let root_exists = root_path.exists();
+    let sqlite_exists = sqlite_dir_path.exists();
+
+    match (root_exists, sqlite_exists) {
+        (true, true) => {
+            let root_mtime = fs::metadata(&root_path)
+                .and_then(|metadata| metadata.modified())
+                .ok();
+            let sqlite_mtime = fs::metadata(&sqlite_dir_path)
+                .and_then(|metadata| metadata.modified())
+                .ok();
+
+            match (root_mtime, sqlite_mtime) {
+                (Some(root_mtime), Some(sqlite_mtime)) if root_mtime >= sqlite_mtime => root_path,
+                (Some(_), Some(_)) => sqlite_dir_path,
+                (Some(_), None) => root_path,
+                (None, Some(_)) => sqlite_dir_path,
+                (None, None) => root_path,
+            }
+        }
+        (true, false) => root_path,
+        (false, true) => sqlite_dir_path,
+        (false, false) => root_path,
     }
 }
 
@@ -396,11 +425,30 @@ fn attention_hold_ms(kind: &str) -> Option<u64> {
     }
 }
 
+fn is_continuation_running_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        EVENT_THINKING | EVENT_TOOL_RUNNING | EVENT_REPLYING | EVENT_NETWORK_RETRY | EVENT_RUNNING
+    )
+}
+
 fn reduce_event(current_status: &StatusSnapshot, event: StatusEvent) -> StatusSnapshot {
     let thread_id = event
         .thread_id
         .clone()
         .or_else(|| current_status.thread_id.clone());
+
+    if current_status.last_event_kind == EVENT_COOLDOWN
+        && is_continuation_running_kind(event.kind)
+    {
+        return snapshot_for(
+            STATE_RUNNING,
+            "Codex 刚完成任务，黄灯会短暂停留",
+            EVENT_COOLDOWN,
+            current_status.last_event_at,
+            thread_id,
+        );
+    }
 
     match event.kind {
         EVENT_TURN_COMPLETED => snapshot_for(
@@ -544,8 +592,20 @@ fn classify_log_text(text: &str) -> Option<&'static str> {
         return Some(EVENT_NETWORK_RETRY);
     }
 
+    if text.contains("event.name=\"codex.user_prompt\"") {
+        return Some(EVENT_TURN_STARTED);
+    }
+
+    if text.contains("run_sampling_request") || text.contains("stream_request") {
+        return Some(EVENT_THINKING);
+    }
+
     if text.contains("Turn error") {
         return Some(EVENT_TURN_ERROR);
+    }
+
+    if text.contains("app-server event: item/completed") {
+        return Some(EVENT_TURN_COMPLETED);
     }
 
     if text.contains("response.completed") || text.contains("turn-ended") {
@@ -560,11 +620,19 @@ fn classify_log_text(text: &str) -> Option<&'static str> {
         return Some(EVENT_TOOL_RUNNING);
     }
 
+    if text.contains("response.custom_tool_call_input.delta") {
+        return Some(EVENT_TOOL_RUNNING);
+    }
+
     if text.contains("response.output_item.added") && text.contains("\"type\":\"message\"") {
         return Some(EVENT_REPLYING);
     }
 
     if text.contains("response.output_text.delta") {
+        return Some(EVENT_REPLYING);
+    }
+
+    if text.contains("app-server event: item/agentMessage/delta") {
         return Some(EVENT_REPLYING);
     }
 
@@ -811,13 +879,16 @@ fn select_approval_rows(
 ) -> Result<Vec<LogRow>, String> {
     let conversation_pattern = format!("%conversation.id={thread_id}%");
     let thread_pattern = format!("%thread_id={thread_id}%");
+    let approval_pattern = "%\"sandbox_permissions\":\"require_escalated\"%";
+    let justification_pattern = "%\"justification\":\"%";
     let sql = format!(
-        "select ts, ts_nanos, thread_id, substr(feedback_log_body, 1, 2400) as feedback_log_body \
+        "select ts, ts_nanos, thread_id, substr(feedback_log_body, 1, 12000) as feedback_log_body \
          from logs \
          where (thread_id = ?1 or feedback_log_body like ?2 or feedback_log_body like ?3) \
          and feedback_log_body is not null \
          and ( \
-             (feedback_log_body like '%handle_output_item_done: ToolCall:%' and feedback_log_body like '%sandbox_permissions%require_escalated%') \
+             (feedback_log_body like '%handle_output_item_done: ToolCall:%' and feedback_log_body like ?4 and feedback_log_body like ?5) \
+             or feedback_log_body like '%handle_output_item_done: ToolCall: mcp__%' \
              or feedback_log_body like '%event.name=\"codex.tool_decision\"%' \
              or feedback_log_body like '%event.name=\"codex.tool_result\"%' \
          ) \
@@ -829,7 +900,13 @@ fn select_approval_rows(
         .map_err(|error| format!("failed to prepare approval query: {error}"))?;
     let rows = statement
         .query_map(
-            params![thread_id, conversation_pattern, thread_pattern],
+            params![
+                thread_id,
+                conversation_pattern,
+                thread_pattern,
+                approval_pattern,
+                justification_pattern
+            ],
             |row| {
                 Ok(LogRow {
                     ts: row.get(0)?,
@@ -849,9 +926,24 @@ fn select_approval_rows(
 }
 
 fn is_approval_request(text: &str) -> bool {
-    text.contains("handle_output_item_done: ToolCall:")
-        && text.contains("sandbox_permissions")
-        && text.contains("require_escalated")
+    let Some(tool_call_index) = text.find("handle_output_item_done: ToolCall:") else {
+        return false;
+    };
+
+    if text.contains("handle_output_item_done: ToolCall: mcp__") {
+        return true;
+    }
+
+    let Some(permission_relative_index) =
+        text[tool_call_index..].find("\"sandbox_permissions\":\"require_escalated\"")
+    else {
+        return false;
+    };
+    if permission_relative_index > 512 {
+        return false;
+    }
+
+    text[tool_call_index + permission_relative_index..].contains("\"justification\":\"")
 }
 
 fn is_approval_resolution(text: &str) -> bool {
@@ -941,6 +1033,8 @@ fn evaluate_thread_status(
                     .max()
                     .unwrap_or(approval_event_at),
             ),
+            cwd: PathBuf::new(),
+            workspace_match: None,
         });
     }
 
@@ -967,21 +1061,24 @@ fn evaluate_thread_status(
     Ok(ThreadStatusEvaluation {
         snapshot: derive_status(&status, now),
         latest_real_event_at,
+        cwd: PathBuf::new(),
+        workspace_match: None,
     })
 }
 
-fn select_global_snapshots(
+fn select_global_evaluations(
     state_connection: &Connection,
     logs_connection: &Connection,
+    cwd: Option<&Path>,
     now: u64,
-) -> Result<Vec<StatusSnapshot>, String> {
+) -> Result<Vec<ThreadStatusEvaluation>, String> {
     let cutoff = now.saturating_sub(global_thread_window_ms_from_env());
     let mut evaluations = Vec::new();
 
     for candidate in
         select_recent_thread_candidates(state_connection, DEFAULT_THREAD_CANDIDATE_SCAN_LIMIT)?
     {
-        let evaluation = evaluate_thread_status(logs_connection, &candidate.id, now)?;
+        let mut evaluation = evaluate_thread_status(logs_connection, &candidate.id, now)?;
         let is_pending_approval = evaluation.snapshot.last_event_kind == EVENT_APPROVAL_REQUIRED;
         let has_recent_real_event = evaluation
             .latest_real_event_at
@@ -989,6 +1086,8 @@ fn select_global_snapshots(
             .unwrap_or(false);
 
         if has_recent_real_event || is_pending_approval {
+            evaluation.workspace_match = cwd.and_then(|target_cwd| path_match_score(target_cwd, &candidate.cwd));
+            evaluation.cwd = candidate.cwd;
             evaluations.push(evaluation);
         }
     }
@@ -1001,12 +1100,40 @@ fn select_global_snapshots(
                 snapshot_priority(&right.snapshot, now).cmp(&snapshot_priority(&left.snapshot, now))
             })
     });
-    evaluations.truncate(DEFAULT_GLOBAL_THREAD_LIMIT);
 
-    Ok(evaluations
-        .into_iter()
-        .map(|evaluation| evaluation.snapshot)
-        .collect())
+    Ok(evaluations)
+}
+
+fn workspace_running_preferred_snapshot(
+    evaluations: &[ThreadStatusEvaluation],
+    cwd: Option<&Path>,
+    now: u64,
+) -> Option<StatusSnapshot> {
+    let target_cwd = cwd?;
+    let latest_global_event_at = evaluations
+        .iter()
+        .filter_map(|evaluation| evaluation.latest_real_event_at)
+        .max()?;
+    let cutoff = latest_global_event_at.saturating_sub(GLOBAL_WORKSPACE_PREFERENCE_GRACE_MS);
+
+    evaluations
+        .iter()
+        .filter(|evaluation| {
+            evaluation.snapshot.state == STATE_RUNNING
+                && evaluation.snapshot.last_event_kind != EVENT_APPROVAL_REQUIRED
+                && evaluation.latest_real_event_at.unwrap_or(0) >= cutoff
+                && evaluation
+                    .workspace_match
+                    .or_else(|| path_match_score(target_cwd, &evaluation.cwd))
+                    .is_some()
+        })
+        .max_by(|left, right| {
+            left.workspace_match
+                .cmp(&right.workspace_match)
+                .then_with(|| left.latest_real_event_at.cmp(&right.latest_real_event_at))
+                .then_with(|| snapshot_priority(&left.snapshot, now).cmp(&snapshot_priority(&right.snapshot, now)))
+        })
+        .map(|evaluation| evaluation.snapshot.clone())
 }
 
 fn freshness_priority(age_ms: u64) -> u8 {
@@ -1025,6 +1152,11 @@ fn snapshot_priority(snapshot: &StatusSnapshot, now: u64) -> (u8, u8, u64) {
         STATE_ATTENTION if age_ms <= DOMINANT_ATTENTION_FRESH_MS => 5,
         STATE_RUNNING if snapshot.last_event_kind == EVENT_APPROVAL_REQUIRED => 4,
         STATE_RUNNING if age_ms <= DOMINANT_RUNNING_FRESH_MS => 3,
+        STATE_IDLE if snapshot.last_event_kind == EVENT_TURN_COMPLETED
+            && age_ms <= DOMINANT_COMPLETED_FRESH_MS =>
+        {
+            2
+        }
         STATE_ATTENTION => 2,
         STATE_RUNNING => 1,
         STATE_IDLE => 0,
@@ -1053,6 +1185,32 @@ fn pick_dominant_snapshot(
     dominant.unwrap_or_else(|| StatusSnapshot::unavailable("状态暂时不可用"))
 }
 
+fn pick_dominant_evaluation(
+    evaluations: Vec<ThreadStatusEvaluation>,
+    cwd: Option<&Path>,
+    now: u64,
+) -> StatusSnapshot {
+    if evaluations.is_empty() {
+        return StatusSnapshot::unavailable("状态暂时不可用");
+    }
+
+    let snapshots = evaluations
+        .iter()
+        .map(|evaluation| evaluation.snapshot.clone())
+        .collect::<Vec<_>>();
+    let dominant = pick_dominant_snapshot(snapshots, now);
+
+    let dominant_is_normal_running = dominant.state == STATE_RUNNING
+        && dominant.last_event_kind != EVENT_APPROVAL_REQUIRED;
+    if dominant_is_normal_running {
+        if let Some(preferred) = workspace_running_preferred_snapshot(&evaluations, cwd, now) {
+            return preferred;
+        }
+    }
+
+    dominant
+}
+
 fn derive_status_from_sqlite(
     logs_path: &Path,
     state_path: &Path,
@@ -1071,29 +1229,31 @@ fn derive_status_from_sqlite(
 
     let logs_connection = open_sqlite_readonly(logs_path)?;
 
-    let snapshots = match thread_scope_from_env() {
+    match thread_scope_from_env() {
         ThreadScope::Workspace => {
             let Some(thread_id) = select_active_thread_id(&state_connection, cwd)? else {
                 return Ok(create_no_recent_activity_status(now));
             };
 
             match derive_status_for_thread(&logs_connection, &thread_id, now) {
-                Ok(snapshot) => vec![snapshot],
+                Ok(snapshot) => Ok(snapshot),
                 Err(error) => {
-                    return Ok(StatusSnapshot::unavailable(format!(
+                    Ok(StatusSnapshot::unavailable(format!(
                         "状态暂时不可用：{thread_id}: {error}"
-                    )));
+                    )))
                 }
             }
         }
-        ThreadScope::Global => select_global_snapshots(&state_connection, &logs_connection, now)?,
-    };
+        ThreadScope::Global => {
+            let evaluations =
+                select_global_evaluations(&state_connection, &logs_connection, cwd, now)?;
+            if evaluations.is_empty() {
+                return Ok(create_no_recent_activity_status(now));
+            }
 
-    if snapshots.is_empty() {
-        return Ok(create_no_recent_activity_status(now));
+            Ok(pick_dominant_evaluation(evaluations, cwd, now))
+        }
     }
-
-    Ok(pick_dominant_snapshot(snapshots, now))
 }
 
 fn target_workspace_cwd() -> Option<PathBuf> {
@@ -1265,6 +1425,55 @@ mod tests {
     }
 
     #[test]
+    fn codex_user_prompt_is_classified_as_turn_started() {
+        let event = classify_log_line(
+            "session_loop{thread_id=abc-123}:submission_dispatch{otel.name=\"op.dispatch.user_input\" submission.id=\"sub_123\" codex.op=\"user_input\"}: event.name=\"codex.user_prompt\" prompt_length=8 event.timestamp=2026-06-13T03:26:05.871Z conversation.id=abc-123",
+        )
+        .expect("event should be classified");
+
+        assert_eq!(event.kind, EVENT_TURN_STARTED);
+        assert_eq!(event.thread_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn run_sampling_request_is_classified_as_thinking() {
+        let event = classify_log_line(
+            "session_loop{thread_id=abc-123}:submission_dispatch{otel.name=\"op.dispatch.user_input\"}:turn{otel.name=\"session_task.turn\"}:run_turn:run_sampling_request{turn_id=turn_123}:stream_request:model_client.stream_responses_api{}",
+        )
+        .expect("event should be classified");
+
+        assert_eq!(event.kind, EVENT_THINKING);
+        assert_eq!(event.thread_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn custom_tool_input_is_classified_as_tool_running() {
+        let event = classify_log_line(
+            "event.name=\"codex.sse_event\" event.kind=response.custom_tool_call_input.delta event.timestamp=2026-06-13T03:20:37.126Z conversation.id=abc-123",
+        )
+        .expect("event should be classified");
+
+        assert_eq!(event.kind, EVENT_TOOL_RUNNING);
+        assert_eq!(event.thread_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn app_server_agent_message_delta_is_classified_as_replying() {
+        let event = classify_log_line("app-server event: item/agentMessage/delta targeted_connections=1")
+            .expect("event should be classified");
+
+        assert_eq!(event.kind, EVENT_REPLYING);
+    }
+
+    #[test]
+    fn app_server_completed_is_classified_as_turn_completed() {
+        let event = classify_log_line("app-server event: item/completed targeted_connections=1")
+            .expect("event should be classified");
+
+        assert_eq!(event.kind, EVENT_TURN_COMPLETED);
+    }
+
+    #[test]
     fn completion_hold_expires_back_to_green() {
         let cooling = reduce_event(
             &create_initial_status(1_000),
@@ -1275,6 +1484,39 @@ mod tests {
         assert_eq!(settled.state, STATE_IDLE);
         assert_eq!(settled.last_event_kind, EVENT_TURN_COMPLETED);
         assert_eq!(settled.reason, "本轮已完成");
+    }
+
+    #[test]
+    fn completion_hold_ignores_trailing_thinking_events_from_same_turn() {
+        let cooling = reduce_event(
+            &create_initial_status(1_000),
+            classify_log_line("2026-06-05T01:00:05Z TRACE codex_api::sse::responses|SSE event: {\"type\":\"response.completed\"}").unwrap(),
+        );
+        let still_cooling = reduce_event(
+            &cooling,
+            classify_log_line("2026-06-05T01:00:06Z TRACE codex_api::sse::responses|SSE event: {\"type\":\"response.in_progress\"}").unwrap(),
+        );
+
+        assert_eq!(still_cooling.state, STATE_RUNNING);
+        assert_eq!(still_cooling.last_event_kind, EVENT_COOLDOWN);
+        assert_eq!(still_cooling.last_event_at, cooling.last_event_at);
+        assert_eq!(still_cooling.reason, "Codex 刚完成任务，黄灯会短暂停留");
+    }
+
+    #[test]
+    fn completion_hold_yields_to_a_real_new_turn_start() {
+        let cooling = reduce_event(
+            &create_initial_status(1_000),
+            classify_log_line("2026-06-05T01:00:05Z TRACE codex_api::sse::responses|SSE event: {\"type\":\"response.completed\"}").unwrap(),
+        );
+        let restarted = reduce_event(
+            &cooling,
+            classify_log_line("2026-06-05T01:00:06Z INFO session_loop{thread_id=abc-123}:submission_dispatch{otel.name=\"op.dispatch.user_input\"}:turn{otel.name=\"session_task.turn\"}: codex_core::tasks: new").unwrap(),
+        );
+
+        assert_eq!(restarted.state, STATE_RUNNING);
+        assert_eq!(restarted.last_event_kind, EVENT_TURN_STARTED);
+        assert_eq!(restarted.reason, "Codex 已开始新一轮");
     }
 
     #[test]
@@ -1356,6 +1598,20 @@ mod tests {
     }
 
     #[test]
+    fn pending_approval_detects_unresolved_mcp_tool_call() {
+        let rows = vec![LogRow {
+            ts: 1_000,
+            ts_nanos: 0,
+            thread_id: Some("abc-123".into()),
+            feedback_log_body: "session_loop{thread_id=abc-123}:handle_output_item_done: ToolCall: mcp__codegraphcodegraph_explore {\"projectPath\":\"/workspace\",\"query\":\"foo\",\"maxFiles\":8} thread_id=abc-123".into(),
+        }];
+
+        let pending = pending_approval_from_rows(&rows, 1_000_500).expect("approval should be pending");
+        assert_eq!(pending.kind, EVENT_APPROVAL_REQUIRED);
+        assert_eq!(pending.thread_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
     fn resolved_approval_is_not_treated_as_pending() {
         let rows = vec![
             LogRow {
@@ -1369,6 +1625,26 @@ mod tests {
                 ts_nanos: 0,
                 thread_id: Some("abc-123".into()),
                 feedback_log_body: "session_loop{thread_id=abc-123}:handle_output_item_done:handle_tool_call:handle_tool_call_with_source:dispatch_tool_call_with_code_mode_result{tool_name=\"exec_command\" call_id=\"call_123\" aborted=false}:handle_output_item_done: ToolCall: exec_command {\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Do you want to allow ...\"}".into(),
+            },
+        ];
+
+        assert!(pending_approval_from_rows(&rows, 1_001_000).is_none());
+    }
+
+    #[test]
+    fn resolved_mcp_approval_is_not_treated_as_pending() {
+        let rows = vec![
+            LogRow {
+                ts: 1_001,
+                ts_nanos: 0,
+                thread_id: Some("abc-123".into()),
+                feedback_log_body: "dispatch_tool_call_with_terminal_outcome: event.name=\"codex.tool_result\" tool_name=mcp__codegraphcodegraph_explore call_id=call_123 success=false conversation.id=abc-123".into(),
+            },
+            LogRow {
+                ts: 1_000,
+                ts_nanos: 0,
+                thread_id: Some("abc-123".into()),
+                feedback_log_body: "session_loop{thread_id=abc-123}:handle_output_item_done: ToolCall: mcp__codegraphcodegraph_explore {\"projectPath\":\"/workspace\",\"query\":\"foo\",\"maxFiles\":8} thread_id=abc-123".into(),
             },
         ];
 
@@ -1429,6 +1705,18 @@ mod tests {
         let pending = pending_approval_from_rows(&rows, 1_000_500).expect("approval should be pending");
         assert_eq!(pending.kind, EVENT_APPROVAL_REQUIRED);
         assert_eq!(pending.thread_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn approval_request_ignores_prompt_context_mentions() {
+        let rows = vec![LogRow {
+            ts: 1_000,
+            ts_nanos: 0,
+            thread_id: Some("abc-123".into()),
+            feedback_log_body: "stream_request:model_client.stream_responses_api: POST to https://api.example.test/responses: {\"instructions\":\"developer text mentioning handle_output_item_done: ToolCall: exec_command {\\\"sandbox_permissions\\\":\\\"require_escalated\\\",\\\"justification\\\":\\\"Do you want to allow ...\\\"}\"}".into(),
+        }];
+
+        assert!(pending_approval_from_rows(&rows, 1_000_500).is_none());
     }
 
     #[test]
@@ -1503,6 +1791,28 @@ mod tests {
         let dominant = pick_dominant_snapshot([old_stalled, fresh_running], 60_000);
         assert_eq!(dominant.state, STATE_RUNNING);
         assert_eq!(dominant.thread_id.as_deref(), Some("thread-running"));
+    }
+
+    #[test]
+    fn dominant_snapshot_prefers_recent_completion_over_old_stalled_attention() {
+        let old_stalled = snapshot_for(
+            STATE_ATTENTION,
+            "Codex 似乎已卡住",
+            EVENT_STALLED,
+            10_000,
+            Some("thread-stalled".into()),
+        );
+        let recent_completion = snapshot_for(
+            STATE_IDLE,
+            "本轮已完成",
+            EVENT_TURN_COMPLETED,
+            59_000,
+            Some("thread-completed".into()),
+        );
+
+        let dominant = pick_dominant_snapshot([old_stalled, recent_completion], 60_000);
+        assert_eq!(dominant.state, STATE_IDLE);
+        assert_eq!(dominant.thread_id.as_deref(), Some("thread-completed"));
     }
 
     #[test]
@@ -1612,6 +1922,49 @@ mod tests {
         assert_eq!(snapshot.state, STATE_RUNNING);
         assert_eq!(snapshot.color, COLOR_YELLOW);
         assert_eq!(snapshot.thread_id.as_deref(), Some("thread-fresh"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn derive_status_from_sqlite_global_prefers_workspace_thread_when_activity_is_nearly_simultaneous() {
+        let dir = temp_test_dir("global-prefers-workspace-thread");
+        let logs_path = dir.join("logs_2.sqlite");
+        let state_path = dir.join("state_5.sqlite");
+
+        let logs_connection = Connection::open(&logs_path).expect("logs db should open");
+        create_logs_table(&logs_connection);
+        insert_log(
+            &logs_connection,
+            1_709,
+            "thread-other",
+            "2026-06-05T01:28:29Z TRACE codex_api::sse::responses|SSE event: {\"type\":\"response.output_text.delta\"} conversation.id=thread-other",
+        );
+        insert_log(
+            &logs_connection,
+            1_706,
+            "thread-workspace",
+            "2026-06-05T01:28:26Z TRACE codex_api::sse::responses|SSE event: {\"type\":\"response.output_text.delta\"} conversation.id=thread-workspace",
+        );
+        drop(logs_connection);
+
+        let state_connection = Connection::open(&state_path).expect("state db should open");
+        create_threads_table(&state_connection);
+        insert_thread(&state_connection, "thread-other", "/tmp/other-project", 9_999);
+        insert_thread(&state_connection, "thread-workspace", "/tmp/workspace", 8_888);
+        drop(state_connection);
+
+        let snapshot = derive_status_from_sqlite(
+            &logs_path,
+            &state_path,
+            Some(Path::new("/tmp/workspace")),
+            1_710_000,
+        )
+        .expect("status");
+
+        assert_eq!(snapshot.state, STATE_RUNNING);
+        assert_eq!(snapshot.color, COLOR_YELLOW);
+        assert_eq!(snapshot.thread_id.as_deref(), Some("thread-workspace"));
 
         let _ = fs::remove_dir_all(dir);
     }
