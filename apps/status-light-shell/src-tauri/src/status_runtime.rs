@@ -1148,6 +1148,7 @@ fn freshness_priority(age_ms: u64) -> u8 {
 fn snapshot_priority(snapshot: &StatusSnapshot, now: u64) -> (u8, u8, u64) {
     let age_ms = now.saturating_sub(snapshot.last_event_at);
     let state_priority = match snapshot.state.as_str() {
+        STATE_RUNNING if snapshot.last_event_kind == EVENT_APPROVAL_REQUIRED => 7,
         STATE_ATTENTION if snapshot.last_event_kind != EVENT_STALLED => 6,
         STATE_ATTENTION if age_ms <= DOMINANT_ATTENTION_FRESH_MS => 5,
         STATE_RUNNING if snapshot.last_event_kind == EVENT_APPROVAL_REQUIRED => 4,
@@ -1163,6 +1164,26 @@ fn snapshot_priority(snapshot: &StatusSnapshot, now: u64) -> (u8, u8, u64) {
         _ => 0,
     };
     (state_priority, freshness_priority(age_ms), snapshot.last_event_at)
+}
+
+fn evaluation_is_actionable(evaluation: &ThreadStatusEvaluation, now: u64) -> bool {
+    let age_ms = now.saturating_sub(evaluation.snapshot.last_event_at);
+
+    matches!(
+        evaluation.snapshot.last_event_kind.as_str(),
+        EVENT_APPROVAL_REQUIRED
+            | EVENT_TURN_STARTED
+            | EVENT_THINKING
+            | EVENT_TOOL_RUNNING
+            | EVENT_REPLYING
+            | EVENT_NETWORK_RETRY
+            | EVENT_RUNNING
+    ) || (evaluation.snapshot.state == STATE_ATTENTION
+        && evaluation.snapshot.last_event_kind != EVENT_STALLED)
+        || (evaluation.snapshot.last_event_kind == EVENT_COOLDOWN
+            && age_ms <= DEFAULT_COMPLETION_HOLD_MS)
+        || (evaluation.snapshot.last_event_kind == EVENT_TURN_COMPLETED
+            && age_ms <= DOMINANT_COMPLETED_FRESH_MS)
 }
 
 fn pick_dominant_snapshot(
@@ -1192,6 +1213,13 @@ fn pick_dominant_evaluation(
 ) -> StatusSnapshot {
     if evaluations.is_empty() {
         return StatusSnapshot::unavailable("状态暂时不可用");
+    }
+
+    if !evaluations
+        .iter()
+        .any(|evaluation| evaluation_is_actionable(evaluation, now))
+    {
+        return create_no_recent_activity_status(now);
     }
 
     let snapshots = evaluations
@@ -1772,6 +1800,28 @@ mod tests {
     }
 
     #[test]
+    fn dominant_snapshot_prefers_approval_over_attention() {
+        let approval = snapshot_for(
+            STATE_RUNNING,
+            "等待你的授权",
+            EVENT_APPROVAL_REQUIRED,
+            2_000,
+            Some("thread-approval".into()),
+        );
+        let attention = snapshot_for(
+            STATE_ATTENTION,
+            "Codex 当前轮次出错",
+            EVENT_TURN_ERROR,
+            3_000,
+            Some("thread-attention".into()),
+        );
+
+        let dominant = pick_dominant_snapshot([attention, approval], 4_000);
+        assert_eq!(dominant.last_event_kind, EVENT_APPROVAL_REQUIRED);
+        assert_eq!(dominant.thread_id.as_deref(), Some("thread-approval"));
+    }
+
+    #[test]
     fn dominant_snapshot_prefers_fresh_running_over_old_stalled_attention() {
         let old_stalled = snapshot_for(
             STATE_ATTENTION,
@@ -1813,6 +1863,41 @@ mod tests {
         let dominant = pick_dominant_snapshot([old_stalled, recent_completion], 60_000);
         assert_eq!(dominant.state, STATE_IDLE);
         assert_eq!(dominant.thread_id.as_deref(), Some("thread-completed"));
+    }
+
+    #[test]
+    fn dominant_evaluations_without_actionable_threads_return_green() {
+        let evaluations = vec![
+            ThreadStatusEvaluation {
+                snapshot: snapshot_for(
+                    STATE_ATTENTION,
+                    "Codex 似乎已卡住",
+                    EVENT_STALLED,
+                    10_000,
+                    Some("thread-stalled".into()),
+                ),
+                latest_real_event_at: Some(10_000),
+                cwd: PathBuf::from("/tmp/stalled"),
+                workspace_match: None,
+            },
+            ThreadStatusEvaluation {
+                snapshot: snapshot_for(
+                    STATE_IDLE,
+                    "本轮已完成",
+                    EVENT_TURN_COMPLETED,
+                    20_000,
+                    Some("thread-done".into()),
+                ),
+                latest_real_event_at: Some(20_000),
+                cwd: PathBuf::from("/tmp/done"),
+                workspace_match: None,
+            },
+        ];
+
+        let dominant = pick_dominant_evaluation(evaluations, None, 60_000);
+        assert_eq!(dominant.state, STATE_IDLE);
+        assert_eq!(dominant.color, COLOR_GREEN);
+        assert_eq!(dominant.reason, "最近没有发现 Codex 活动");
     }
 
     #[test]

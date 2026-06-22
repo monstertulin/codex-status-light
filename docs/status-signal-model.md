@@ -36,6 +36,7 @@ The first version should avoid treating the SQLite files as the only source of t
 - After a turn enters the short completion hold, trailing same-turn `thinking` / `replying` / `tool_running` style events should not break that completion hold; only a real new `turn_started` should bring the light back into active yellow.
 - If several running threads are active at almost the same time, the visible detail can prefer the thread whose `cwd` best matches the current workspace, so the tray stays global while the reason text stays closer to the project you are looking at.
 - Fresh approval waits stay yellow and take precedence over normal running threads.
+- In `global` mode, any fresh approval wait should also take precedence over red attention threads, because the most actionable state is "需要你批准"。
 - Approval waits include both shell/escalation approvals and MCP tool approvals from the desktop client.
 
 ## Cross-platform paths

@@ -7,7 +7,7 @@ import {
   deriveStatus,
   reduceEvent
 } from "./status-machine.mjs";
-import { LIGHT_STATES } from "./status-contract.mjs";
+import { createSnapshot, LIGHT_STATES } from "./status-contract.mjs";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_SQLITE_EVENT_LIMIT = 120;
@@ -90,6 +90,11 @@ function snapshotPriority(snapshot, now) {
   let statePriority = 0;
 
   if (
+    snapshot.state === LIGHT_STATES.RUNNING &&
+    snapshot.lastEventKind === "approval_required"
+  ) {
+    statePriority = 7;
+  } else if (
     snapshot.state === LIGHT_STATES.ATTENTION &&
     snapshot.lastEventKind !== "stalled"
   ) {
@@ -99,11 +104,6 @@ function snapshotPriority(snapshot, now) {
     ageMs <= DOMINANT_ATTENTION_FRESH_MS
   ) {
     statePriority = 5;
-  } else if (
-    snapshot.state === LIGHT_STATES.RUNNING &&
-    snapshot.lastEventKind === "approval_required"
-  ) {
-    statePriority = 4;
   } else if (
     snapshot.state === LIGHT_STATES.RUNNING &&
     ageMs <= DOMINANT_RUNNING_FRESH_MS
@@ -122,6 +122,27 @@ function snapshotPriority(snapshot, now) {
   }
 
   return [statePriority, freshnessPriority(ageMs), snapshot.lastEventAt ?? 0];
+}
+
+function evaluationIsActionable(evaluation, now) {
+  const ageMs = Math.max(0, now - (evaluation.snapshot.lastEventAt ?? 0));
+  const kind = evaluation.snapshot.lastEventKind;
+
+  return (
+    [
+      "approval_required",
+      "turn_started",
+      "thinking",
+      "tool_running",
+      "replying",
+      "network_retry",
+      "running"
+    ].includes(kind) ||
+    (evaluation.snapshot.state === LIGHT_STATES.ATTENTION &&
+      kind !== "stalled") ||
+    (kind === "cooldown" && ageMs <= 3_000) ||
+    (kind === "turn_completed" && ageMs <= DOMINANT_COMPLETED_FRESH_MS)
+  );
 }
 
 function comparePriority(left, right) {
@@ -520,6 +541,16 @@ function pickDominantEvaluation(evaluations, options = {}) {
   }
 
   const now = options.now ?? Date.now();
+  if (!evaluations.some((evaluation) => evaluationIsActionable(evaluation, now))) {
+    return createSnapshot({
+      state: LIGHT_STATES.IDLE,
+      reason: "最近没有发现 Codex 活动",
+      lastEventKind: "startup",
+      lastEventAt: now,
+      threadId: null
+    });
+  }
+
   const dominant = pickDominantSnapshot(
     evaluations.map((item) => item.snapshot),
     now

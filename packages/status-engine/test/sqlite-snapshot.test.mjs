@@ -237,7 +237,7 @@ test("deriveStatusFromSqliteFiles prefers recent completion over old stalled att
               ts_nanos: 0,
               thread_id: "thread-stalled",
               feedback_log_body:
-                'event.name="codex.sse_event" event.kind=response.in_progress event.timestamp=2026-06-05T01:00:10.000Z conversation.id=thread-stalled'
+                '2026-06-05T01:00:10.000Z INFO codex_core::session: Turn error: Unauthorized conversation.id=thread-stalled'
             }
           ])
         };
@@ -271,6 +271,64 @@ test("deriveStatusFromSqliteFiles prefers recent completion over old stalled att
   assert.equal(status.state, LIGHT_STATES.IDLE);
   assert.equal(status.threadId, "thread-completed");
   assert.equal(status.lastEventKind, "turn_completed");
+});
+
+test("deriveStatusFromSqliteFiles returns green when no actionable threads remain", async () => {
+  const runner = async (_command, args) => {
+    const sqlitePath = args[1];
+    const sql = args[2];
+
+    if (sqlitePath === "state.sqlite") {
+      return {
+        stdout: JSON.stringify([
+          { id: "thread-stalled", cwd: "/other" },
+          { id: "thread-completed", cwd: "/workspace" }
+        ])
+      };
+    }
+
+    if (sqlitePath === "logs.sqlite") {
+      if (sql.includes("thread_id = 'thread-stalled'")) {
+        return {
+          stdout: JSON.stringify([
+            {
+              ts: 10,
+              ts_nanos: 0,
+              thread_id: "thread-stalled",
+              feedback_log_body:
+                '2026-06-05T01:00:10.000Z INFO codex_core::session: Turn error: Unauthorized conversation.id=thread-stalled'
+            }
+          ])
+        };
+      }
+
+      if (sql.includes("thread_id = 'thread-completed'")) {
+        return {
+          stdout: JSON.stringify([
+            {
+              ts: 20,
+              ts_nanos: 0,
+              thread_id: "thread-completed",
+              feedback_log_body:
+                'event.name="codex.sse_event" event.kind=response.completed event.timestamp=2026-06-05T01:00:20.000Z conversation.id=thread-completed'
+            }
+          ])
+        };
+      }
+    }
+
+    throw new Error(`unexpected sqlite request: ${sqlitePath} ${sql}`);
+  };
+
+  const status = await deriveStatusFromSqliteFiles("logs.sqlite", "state.sqlite", {
+    now: 60_000,
+    execFileAsync: runner
+  });
+
+  assert.equal(status.state, LIGHT_STATES.IDLE);
+  assert.equal(status.color, "green");
+  assert.equal(status.reason, "最近没有发现 Codex 活动");
+  assert.equal(status.lastEventKind, "startup");
 });
 
 test("deriveStatusFromSqliteFiles prefers the current workspace thread when global activity is nearly simultaneous", async () => {
@@ -361,6 +419,77 @@ test("deriveStatusFromSqliteFiles prioritizes unresolved approval requests", asy
             thread_id: "thread-approval",
             feedback_log_body:
               'event.name="codex.sse_event" event.kind=response.output_text.delta event.timestamp=2026-06-05T02:37:59.000Z conversation.id=thread-approval'
+          }
+        ])
+      };
+    }
+
+    throw new Error(`unexpected sqlite path: ${sqlitePath}`);
+  };
+
+  const status = await deriveStatusFromSqliteFiles("logs.sqlite", "state.sqlite", {
+    cwd: "/workspace",
+    now: Date.parse("2026-06-05T02:38:00.000Z"),
+    execFileAsync: runner
+  });
+
+  assert.equal(status.state, LIGHT_STATES.RUNNING);
+  assert.equal(status.threadId, "thread-approval");
+  assert.equal(status.lastEventKind, "approval_required");
+  assert.equal(status.reason, "等待你的授权");
+});
+
+test("deriveStatusFromSqliteFiles prioritizes approval over attention in global mode", async () => {
+  const runner = async (_command, args) => {
+    const sqlitePath = args[1];
+    const sql = args[2];
+
+    if (sqlitePath === "state.sqlite") {
+      return {
+        stdout: JSON.stringify([
+          { id: "thread-attention", cwd: "/other" },
+          { id: "thread-approval", cwd: "/workspace" }
+        ])
+      };
+    }
+
+    if (sqlitePath === "logs.sqlite") {
+      if (sql.includes("thread_id = 'thread-attention'")) {
+        return {
+          stdout: JSON.stringify([
+            {
+              ts: 1780627079,
+              ts_nanos: 0,
+              thread_id: "thread-attention",
+              feedback_log_body:
+                '2026-06-05T02:37:59.000Z INFO codex_core::session: Turn error: Unauthorized conversation.id=thread-attention'
+            }
+          ])
+        };
+      }
+
+      if (sql.includes('%"sandbox_permissions":"require_escalated"%')) {
+        return {
+          stdout: JSON.stringify([
+            {
+              ts: 1780627078,
+              ts_nanos: 0,
+              thread_id: "thread-approval",
+              feedback_log_body:
+                'session_loop{thread_id=thread-approval}:handle_output_item_done:handle_tool_call:handle_tool_call_with_source:dispatch_tool_call_with_code_mode_result{tool_name="exec_command" call_id="call_123" aborted=false}:handle_output_item_done: ToolCall: exec_command {"sandbox_permissions":"require_escalated","justification":"Do you want to allow ..."}'
+            }
+          ])
+        };
+      }
+
+      return {
+        stdout: JSON.stringify([
+          {
+            ts: 1780627077,
+            ts_nanos: 0,
+            thread_id: "thread-approval",
+            feedback_log_body:
+              'event.name="codex.sse_event" event.kind=response.output_text.delta event.timestamp=2026-06-05T02:37:57.000Z conversation.id=thread-approval'
           }
         ])
       };
